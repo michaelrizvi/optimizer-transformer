@@ -5,8 +5,8 @@ dataset:
   name: counting
   counting:
     min_range_size: 1
-    max_range_size: 10
-    vocab_size: 20
+    max_range_size: 5 
+    vocab_size: 110 
     sep_token: 102
     pad_token: 103
 model:
@@ -18,15 +18,15 @@ model:
     d_ff: 512
     max_len: 64
     dropout: 0.1
-  model_count_times_batch_size: 1000
+  model_count_times_batch_size: 128
   init: regular
 optimizer:
   name: SGD
   lr: 0.001
-  epochs: 100
-  batch_size: 8
+  epochs: 400
+  batch_size: 128 
   es_acc: 0.95
 distributed:
-  loss_thres: -999,999
-  num_samples: 500
-  target_model_count_subrun: 10
+  loss_thres: "-999,999"
+  num_samples: "500"
+  target_model_count_subrun: 1

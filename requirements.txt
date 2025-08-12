@@ -1,0 +1,9 @@
+torch
+torchvision
+matplotlib
+scipy
+tabulate
+tqdm
+terminaltables
+fastargs
+pyyaml

@@ -83,7 +83,12 @@ Section("output", "arguments associated with output").params(
     folder=Param(str, default='test_distributed')
 )
 
-
+@param('model.arch')
+def get_loss_and_acc_calculation(arch=None):
+    if arch == "transformer":
+            return calculate_transformer_loss_acc
+    else:
+        return calculate_loss_acc_vanilla
 
 @section('dataset')
 @param('name')
@@ -265,23 +270,24 @@ def train_sgd(
             train_loss, train_acc = calculate_loss_acc(train_data[idx], train_labels[idx], model, loss_func)
 
 
-            if es_u != float('inf'):
-                with torch.no_grad():
-                    train_loss_all, train_acc_all = calculate_loss_acc(train_data, train_labels,
-                                                                       model.forward_normalize,
-                                                                       loss_func)
-                train_loss = torch.where((train_loss_all > es_u) | (train_acc_all < 1), train_loss,
-                                         torch.zeros_like(train_loss))
+            #if es_u != float('inf'):
+                #with torch.no_grad():
+                    #train_loss_all, train_acc_all = calculate_loss_acc(train_data, train_labels,
+                                                                       #model,
+                                                                       #loss_func)
+                #es_u_tensor = torch.tensor(es_u, device=train_loss_all.device)
+                #train_loss = torch.where((train_loss_all > es_u_tensor) | (train_acc_all < 1), train_loss,
+                                         #torch.zeros_like(train_loss))
                 
-                train_loss = train_loss[~train_loss.isnan()]
+                #train_loss = train_loss[~train_loss.isnan()]
             optimizer.zero_grad()
             train_loss.sum().backward()
             optimizer.step()
         scheduler.step()
         with torch.no_grad():
             if epoch % (epochs // 100 + 1) == 0:
-                train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model.forward_normalize, loss_func)
-                test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model.forward_normalize, loss_func)
+                train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
+                test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
                 if len(train_loss[train_acc==1]) > 0:
                     print(f"train loss range: {train_loss[train_acc==1].max().item()} {train_loss[train_acc==1].min().item()}")
                 train_loss = train_loss[~train_loss.isnan()]
@@ -412,8 +418,8 @@ def train_ps_fast(train_data, train_labels, test_data, test_labels, model, loss_
     for epoch in range(epochs):
         model.pattern_search(train_data, train_labels, loss_func)
         if epoch % (epochs // 100) == 0:
-            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model.forward_normalize, loss_func)
-            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model.forward_normalize, loss_func)
+            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
+            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
             print(
                 f"epoch {epoch} - train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}, train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}")
             print(
@@ -431,8 +437,8 @@ def train_greedy_random(train_data, train_labels, test_data, test_labels, model,
     for epoch in range(epochs):
         model.greedy_random(train_data, train_labels, loss_func)
         if epoch % (epochs // 300) == 0:
-            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model.forward_normalize, loss_func)
-            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model.forward_normalize, loss_func)
+            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
+            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
             print(
                 f"epoch {epoch} - train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}, train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}")
             print(
@@ -506,6 +512,7 @@ if __name__ == "__main__":
     config.collect_argparse_args(parser)
     config.summary()
     config_ns = config.get()
+    calculate_loss_acc = get_loss_and_acc_calculation()
  
     
     loss_thres = [float(v) for v in config['distributed.loss_thres'].split(",")]
@@ -578,13 +585,13 @@ if __name__ == "__main__":
                 train_data, train_labels, test_data, test_labels, model, loss_func, optimizer, scheduler, 
                 batch_size=cur_batch_size, es_u=es_u, test_all_data=test_all_data, test_all_labels=test_all_labels)
             with torch.no_grad():
-                train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model_result.forward_normalize, loss_func, batch_size=cur_batch_size)
+                train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model_result, loss_func, batch_size=cur_batch_size)
                 if train_acc.max() > prior_max:
                     print("max train acc:", train_acc.max().detach().cpu().item())
                     prior_max = train_acc.max()
                 print("tested_model_count", tested_model_count)
             # filtering models based on loss threshold
-            perfect_model_idxs = ((es_l< train_loss) & (train_loss <= es_u) & (train_acc == 1.0))
+            perfect_model_idxs = ((es_l< train_loss) & (train_loss <= es_u) & (train_acc.to(train_loss.device) == 1.0))
 
             perfect_model_count_cur = perfect_model_idxs.sum().detach().cpu().item()
             perfect_model_count += perfect_model_count_cur
@@ -648,8 +655,11 @@ if __name__ == "__main__":
             with torch.no_grad():
                 loss, acc = calculate_loss_acc(train_data.cpu(), train_labels.cpu(), new_models, loss_func, batch_size=1)
                 test_loss, test_acc = calculate_loss_acc(test_all_data.cpu(), test_all_labels.cpu(), new_models, loss_func, batch_size=1)
+                # Calculate exact match for length generalization
+                em_test = calculate_exact_match_accuracy(test_all_labels.cpu(), test_all_data.cpu(), new_models, loss_func, batch_size=1)
                 print(f"verify that train acc is 100%: {acc.mean().item()}")
                 print(f"test acc: {test_acc.mean().item(): 0.3f} ({test_acc.max().item(): 0.3f} , {test_acc.min().item(): 0.3f} )")
+                print(f"exact match test: {em_test.mean().item(): 0.3f} ({em_test.max().item(): 0.3f} , {em_test.min().item(): 0.3f} )")
 
             # saving the models
             os.makedirs(os.path.join(config['output.folder'], "models"), exist_ok=True)

@@ -8,11 +8,7 @@ from itertools import chain
 import random
 from transformer import DecoderOnlyTransformer
 
-def calculate_loss_acc(data, labels, model, loss_func, batch_size=None):
-    # Handle transformer models differently
-    if isinstance(model, TransformerModels):
-        return calculate_transformer_loss_acc(data, labels, model, loss_func, batch_size)
-    
+def calculate_loss_acc_vanilla(data, labels, model, loss_func, batch_size=None):
     if batch_size is None:
         pred = model(data)  # pred.shape = (# of examples, # model counts , output_dim)
     else:
