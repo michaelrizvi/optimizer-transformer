@@ -3,7 +3,7 @@ import os
 from tqdm import tqdm
 import argparse
 from utils import *
-from datasets import MNIST, Kink, Cifar10, Slab, SlabLinear, SlabNonlinear4
+from datasets import MNIST, Kink, Cifar10, Slab, SlabLinear, SlabNonlinear4, CountSequenceDataset
 from fastargs import Section, Param, get_current_config
 from fastargs.validation import OneOf
 from fastargs.decorators import param, section
@@ -13,7 +13,7 @@ import json
 from sql import *
 
 Section("dataset", "Dataset parameters").params(
-    name=Param(str, OneOf(("mnist", "kink", "cifar10", "slab", "slab_nonlinear_3", "slab_nonlinear_4", "slab_linear")), default="kink"),
+    name=Param(str, OneOf(("mnist", "kink", "cifar10", "slab", "slab_nonlinear_3", "slab_nonlinear_4", "slab_linear", "counting")), default="kink"),
 )
 Section("dataset.kink", "Dataset parameters for kink").enable_if(
     lambda cfg: cfg['dataset.name'] == 'kink'
@@ -24,8 +24,17 @@ Section("dataset.kink", "Dataset parameters for kink").enable_if(
 Section("dataset.mnistcifar", "Dataset parameters for mnist/cifar").params(
     num_classes=Param(int)
 )
+Section("dataset.counting", "Dataset parameters for counting task").enable_if(
+    lambda cfg: cfg['dataset.name'] == 'counting'
+).params(
+    min_range_size=Param(int, default=1),
+    max_range_size=Param(int, default=10),
+    vocab_size=Param(int, default=20),
+    sep_token=Param(int, default=102),
+    pad_token=Param(int, default=103)
+)
 Section("model", "Model architecture parameters").params(
-    arch=Param(str, OneOf(("mlp", "lenet")), default="mlp"),
+    arch=Param(str, OneOf(("mlp", "lenet", "transformer")), default="mlp"),
     model_count_times_batch_size=Param(int, default=20000*16),
     init=Param(str, OneOf(("uniform", "regular", "uniform2", "uniform5", "sphere100", "sphere200")), default="uniform")
 )
@@ -36,6 +45,14 @@ Section("model.lenet", "Model architecture parameters").params(
 Section("model.mlp", "Model architecture parameters").enable_if(lambda cfg: cfg['model.arch'] == 'mlp').params(
     hidden_units=Param(int),
     layers=Param(int)
+)
+Section("model.transformer", "Transformer model parameters").enable_if(lambda cfg: cfg['model.arch'] == 'transformer').params(
+    d_model=Param(int, default=512),
+    n_layers=Param(int, default=6),
+    n_heads=Param(int, default=8),
+    d_ff=Param(int, default=2048),
+    max_len=Param(int, default=512),
+    dropout=Param(float, default=0.1)
 )
 Section("optimizer").params(
     name=Param(str, OneOf(["SGD", "SGDPoison", "Adam", "RMSProp", "guess", "GD"]), default='guess'),
@@ -73,7 +90,12 @@ Section("output", "arguments associated with output").params(
 @param('mnistcifar.num_classes')
 @param('kink.noise')
 @param('kink.margin')
-def get_dataset(name, num_samples, seed, num_classes=None, noise=None, margin=0.25):
+@param('counting.min_range_size')
+@param('counting.max_range_size')
+@param('counting.vocab_size')
+@param('counting.sep_token')
+@param('counting.pad_token')
+def get_dataset(name, num_samples, seed, num_classes=None, noise=None, margin=0.25, min_range_size=1, max_range_size=10, vocab_size=20, sep_token=102, pad_token=103):
     if name =="mnist":
         name = MNIST(batch_size=num_samples, threads=1, aug='none', train_count=num_samples, num_classes=num_classes, seed=seed)
         train_data, train_labels = next(iter(name.train))
@@ -120,6 +142,42 @@ def get_dataset(name, num_samples, seed, num_classes=None, noise=None, margin=0.
         test_data = train_data
         test_labels = train_labels
         test_all_data, test_all_labels = train_data, train_labels
+    elif name == "counting":
+        # For counting task, we create sequence data
+        train_dataset = CountSequenceDataset(
+            n_samples=num_samples,
+            min_range_size=min_range_size,
+            max_range_size=max_range_size,
+            vocab_size=vocab_size,
+            sep_token=sep_token,
+            pad_token=pad_token,
+            seed=seed
+        )
+        # Test dataset with longer sequences for length generalization
+        test_dataset = CountSequenceDataset(
+            n_samples=min(num_samples, 100),
+            min_range_size=max_range_size + 1,
+            max_range_size=max_range_size + 5,
+            vocab_size=vocab_size,
+            sep_token=sep_token,
+            pad_token=pad_token,
+            seed=seed + 1
+        )
+        
+        # Convert to tensors and pad sequences
+        from torch.nn.utils.rnn import pad_sequence
+        
+        train_sequences = [train_dataset[i] for i in range(len(train_dataset))]
+        test_sequences = [test_dataset[i] for i in range(len(test_dataset))]
+        
+        # Pad sequences to same length
+        train_data = pad_sequence(train_sequences, batch_first=True, padding_value=pad_token).cuda()
+        test_data = pad_sequence(test_sequences, batch_first=True, padding_value=pad_token).cuda()
+        
+        # For counting task, there are no separate labels - sequences contain both input and target
+        train_labels = train_data  # Dummy labels - not used
+        test_labels = test_data    # Dummy labels - not used
+        test_all_data, test_all_labels = test_data, test_data
     return train_data, train_labels, test_data, test_labels, test_all_data, test_all_labels
 
 
@@ -140,6 +198,20 @@ def get_model(arch, model_count, device):
         model = LinearModels(input_dim=(28*28 if config['dataset.name'] == "mnist" else 32*32*3),
                              output_dim=config['dataset.mnistcifar.num_classes'],
                           model_count=model_count, device=device)
+    elif arch == "transformer":
+        model = TransformerModels(
+            vocab_size=config['dataset.counting.vocab_size'] + 2,  # +2 for sep and pad tokens
+            d_model=config['model.transformer.d_model'],
+            n_layers=config['model.transformer.n_layers'],
+            n_heads=config['model.transformer.n_heads'],
+            d_ff=config['model.transformer.d_ff'],
+            max_len=config['model.transformer.max_len'],
+            model_count=model_count,
+            device=device,
+            dropout=config['model.transformer.dropout'],
+            sep_token_id=config['dataset.counting.sep_token'],
+            pad_token_id=config['dataset.counting.pad_token']
+        ).to(device)
     return model
 
 

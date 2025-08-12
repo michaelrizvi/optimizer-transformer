@@ -471,6 +471,81 @@ class SlabLinear(Dataset):
     def __getitem__(self, index):
         return self.data[index].astype(np.float32), self.labels[index].astype(np.int64)
 
+def count_fn(input_seq):
+    """
+    Given input sequence [min_val, max_val], return counting sequence [min_val, min_val+1, ..., max_val]
+    """
+    min_val, max_val = input_seq[0].item(), input_seq[1].item()
+    return torch.arange(min_val, max_val + 1)
+
+
+class CountSequenceDataset(Dataset):
+    """
+    Dataset for COUNT task: given [min_val, max_val], generate sequence from min to max.
+    
+    This dataset generates sequences of the form: [min_val, max_val] + [sep_token] + [min_val, min_val+1, ..., max_val]
+    For next-token prediction training, where the model learns to count from min to max.
+    
+    Example:
+    Input: [2, 5]
+    Output: [2, 3, 4, 5] 
+    Full sequence: [2, 5, 102, 2, 3, 4, 5]  (102 is separator '>')
+    """
+    
+    def __init__(
+        self,
+        n_samples: int,
+        min_range_size: int = 1,  # Minimum size of counting range (max - min)
+        max_range_size: int = 10, # Maximum size of counting range (max - min)
+        vocab_size: int = 20,
+        sep_token: int = 102,
+        pad_token: int = 103,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.n_samples = n_samples
+        self.min_range_size = min_range_size
+        self.max_range_size = max_range_size
+        self.vocab_size = vocab_size
+        self.sep_token = sep_token
+        self.pad_token = pad_token
+        
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+        
+        # Pregenerate all samples
+        self.sequences = []
+        for _ in range(n_samples):
+            # 1) Sample range size uniformly from [min_range_size, max_range_size]
+            range_size = torch.randint(self.min_range_size, self.max_range_size + 1, (1,)).item()
+            
+            # 2) Sample min_val ensuring max_val stays within vocab_size
+            max_possible_min = self.vocab_size - range_size
+            min_val = torch.randint(0, max_possible_min, (1,)).item()
+            max_val = min_val + range_size
+            
+            # 3) Create input sequence [min_val, max_val]
+            input_seq = torch.tensor([min_val, max_val])
+            
+            # 4) Apply count function to get output sequence
+            output_seq = count_fn(input_seq)
+            
+            # Create full sequence: [min_val, max_val] + [sep_token] + [output]
+            full_seq = torch.cat([
+                input_seq,
+                torch.tensor([self.sep_token]),
+                output_seq
+            ])
+            
+            self.sequences.append(full_seq)
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return self.sequences[index]
+
+
 if __name__ == "__main__":
     # plotting slab datasets
     import matplotlib.pyplot as plt

@@ -6,8 +6,13 @@ import numpy as np
 import torch.nn.functional as F
 from itertools import chain
 import random
+from transformer import DecoderOnlyTransformer
 
 def calculate_loss_acc(data, labels, model, loss_func, batch_size=None):
+    # Handle transformer models differently
+    if isinstance(model, TransformerModels):
+        return calculate_transformer_loss_acc(data, labels, model, loss_func, batch_size)
+    
     if batch_size is None:
         pred = model(data)  # pred.shape = (# of examples, # model counts , output_dim)
     else:
@@ -20,6 +25,139 @@ def calculate_loss_acc(data, labels, model, loss_func, batch_size=None):
     loss = loss_func(pred.view(n * m, o), labels.repeat_interleave(m)).view(n, m).mean(dim=0)
     acc = (pred.view(n * m, o).argmax(dim=1) == labels.repeat_interleave(m)).view(n, m).float().mean(dim=0)
     return loss, acc
+
+
+def calculate_transformer_loss_acc(data, labels, model, loss_func, batch_size=None):
+    """
+    Calculate loss and accuracy for transformer models on counting task.
+    For counting task, 'data' contains the full sequences and 'labels' is ignored.
+    """
+    if batch_size is None:
+        # For next-token prediction: input = seq[:-1], target = seq[1:]
+        x = data[:, :-1]  # All tokens except last
+        y = data[:, 1:]   # All tokens except first (shifted by 1)
+        
+        logits = model(x)  # (batch_size, model_count, seq_len, vocab_size)
+        
+        # Use model's loss function which handles padding
+        loss = model.loss_function(y, logits)  # (model_count,)
+        
+        # Calculate token-wise accuracy on answer portion only
+        acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+        
+        return loss, acc
+    else:
+        # Batched processing
+        all_losses = []
+        all_accs = []
+        
+        for i in range(0, len(data), batch_size):
+            batch_data = data[i:min(i+batch_size, len(data))]
+            
+            x = batch_data[:, :-1]
+            y = batch_data[:, 1:]
+            
+            logits = model(x)
+            loss = model.loss_function(y, logits)
+            acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+            
+            all_losses.append(loss)
+            all_accs.append(acc)
+        
+        # Average across batches
+        loss = torch.stack(all_losses).mean(dim=0)
+        acc = torch.stack(all_accs).mean(dim=0)
+        
+        return loss, acc
+
+
+def calculate_counting_accuracy(target, logits, sep_token_id, pad_token_id):
+    """
+    Calculate token-wise accuracy only on the counting part (after separator).
+    """
+    preds = logits.argmax(dim=-1)  # (batch_size, model_count, seq_len)
+    batch_size, model_count, seq_len = preds.size()
+    
+    model_accs = []
+    
+    for model_idx in range(model_count):
+        correct_tokens = 0
+        total_tokens = 0
+        
+        for batch_idx in range(batch_size):
+            # Find separator token position
+            sep_positions = (target[batch_idx] == sep_token_id).nonzero(as_tuple=True)[0]
+            
+            if len(sep_positions) > 0:
+                sep_pos = sep_positions[0].item()
+                answer_start = sep_pos + 1
+                
+                # Check tokens after separator (ignoring pad tokens)
+                answer_target = target[batch_idx, answer_start:]
+                answer_pred = preds[batch_idx, model_idx, answer_start:]
+                
+                # Mask out padding tokens
+                answer_mask = answer_target != pad_token_id
+                valid_positions = answer_mask.sum().item()
+                
+                if valid_positions > 0:
+                    correct = (answer_pred[answer_mask] == answer_target[answer_mask]).sum().item()
+                    correct_tokens += correct
+                    total_tokens += valid_positions
+        
+        if total_tokens > 0:
+            acc = correct_tokens / total_tokens
+        else:
+            acc = 0.0
+        
+        model_accs.append(torch.tensor(acc))
+    
+    return torch.stack(model_accs)
+
+
+def calculate_exact_match_accuracy(target, logits, sep_token_id, pad_token_id):
+    """
+    Calculate exact match accuracy - 1 if entire answer sequence is correct, 0 otherwise.
+    Only computed on the part after the separator token.
+    """
+    preds = logits.argmax(dim=-1)  # (batch_size, model_count, seq_len)
+    batch_size, model_count, seq_len = preds.size()
+    
+    model_exact_matches = []
+    
+    for model_idx in range(model_count):
+        exact_matches = []
+        
+        for batch_idx in range(batch_size):
+            # Find separator token position
+            sep_positions = (target[batch_idx] == sep_token_id).nonzero(as_tuple=True)[0]
+            
+            if len(sep_positions) == 0:
+                # No separator found - compare full sequence
+                mask = target[batch_idx] != pad_token_id
+                correct_per_token = (preds[batch_idx, model_idx] == target[batch_idx]) | ~mask
+                exact_matches.append(correct_per_token.all().float())
+            else:
+                sep_pos = sep_positions[0].item()
+                answer_start = sep_pos + 1
+                
+                # Check answer portion only
+                answer_target = target[batch_idx, answer_start:]
+                answer_pred = preds[batch_idx, model_idx, answer_start:]
+                
+                # Mask out padding tokens
+                answer_mask = answer_target != pad_token_id
+                
+                if answer_mask.sum() == 0:
+                    exact_matches.append(torch.tensor(1.0))
+                else:
+                    # All non-pad answer tokens must match
+                    correct_answer_tokens = (answer_pred == answer_target) | ~answer_mask
+                    exact_matches.append(correct_answer_tokens.all().float())
+        
+        model_exact_matches.append(torch.stack(exact_matches).mean())
+    
+    return torch.stack(model_exact_matches)
 
 
 def make_permutation_invariant(m1, m2):
@@ -674,6 +812,256 @@ class LinearModels(nn.Module):
             input_dim=self.input_dim, output_dim=self.output_dim,
             model_count=model_count, device=self.device)
         new_model.load_state_dict(self.get_weights_by_idx(idx))
+        return new_model
+
+
+class TransformerModels(nn.Module):
+    def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.d_ff = d_ff
+        self.max_len = max_len
+        self.model_count = model_count
+        self.device = device
+        self.dropout = dropout
+        self.sep_token_id = sep_token_id
+        self.pad_token_id = pad_token_id
+        
+        # Create multiple transformer models using grouped convolutions pattern
+        self.token_emb = nn.Embedding(vocab_size * model_count, d_model)
+        self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
+        
+        # Create transformer blocks - we'll use multiple separate transformers
+        self.transformers = nn.ModuleList([
+            DecoderOnlyTransformer(vocab_size, d_model, n_layers, n_heads, d_ff, max_len, dropout)
+            for _ in range(model_count)
+        ])
+
+    def forward(self, x, position_ids=None):
+        # x shape: (batch_size, seq_len)
+        # Output shape: (batch_size, model_count, seq_len, vocab_size)
+        batch_size, seq_len = x.size()
+        
+        outputs = []
+        for i, transformer in enumerate(self.transformers):
+            out = transformer(x, position_ids)  # (batch_size, seq_len, vocab_size)
+            outputs.append(out.unsqueeze(1))  # (batch_size, 1, seq_len, vocab_size)
+        
+        # Stack along model dimension
+        outputs = torch.cat(outputs, dim=1)  # (batch_size, model_count, seq_len, vocab_size)
+        return outputs
+
+    def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """Cross entropy loss ignoring pad tokens."""
+        # Reshape if needed: (B, M, S, V) -> (B*M*S, V)
+        if logits.dim() > 2:
+            logits = logits.reshape(-1, logits.size(-1))
+        
+        # Reshape target: (B, S) -> (B*S) and repeat for all models
+        if target.dim() == 2:
+            batch_size, seq_len = target.size()
+            target = target.unsqueeze(1).expand(-1, self.model_count, -1).reshape(-1)
+        elif target.dim() == 1:
+            target = target.repeat(self.model_count)
+            
+        # Ignore pad tokens for loss calculation
+        mask = target != self.pad_token_id
+        filtered_logits = logits[mask]
+        filtered_target = target[mask]
+        
+        loss = torch.nn.functional.cross_entropy(filtered_logits, filtered_target, reduction='none')
+        
+        # Reshape loss back to (batch_size * model_count,) then (batch_size, model_count)
+        # This is tricky - we need to figure out how many valid tokens per sequence
+        valid_tokens_per_seq = mask.view(-1, self.model_count).sum(dim=0)  # tokens per model
+        
+        # For simplicity, let's compute loss per model
+        losses = []
+        mask_reshaped = mask.view(-1, self.model_count)  # (total_tokens, model_count)
+        loss_idx = 0
+        
+        for model_idx in range(self.model_count):
+            model_mask = mask_reshaped[:, model_idx]
+            model_valid_count = model_mask.sum().item()
+            if model_valid_count > 0:
+                model_loss = loss[loss_idx:loss_idx + model_valid_count].mean()
+                losses.append(model_loss)
+                loss_idx += model_valid_count
+            else:
+                losses.append(torch.tensor(0.0, device=loss.device))
+        
+        return torch.stack(losses)
+
+    def calculate_exact_match(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """Calculate exact match - 1 if answer portion after separator is correct, 0 otherwise."""
+        # Get predicted tokens - always argmax on last dimension
+        preds = logits.argmax(dim=-1)  # (batch_size, model_count, seq_len)
+        
+        batch_size = target.size(0)
+        model_exact_matches = []
+        
+        for model_idx in range(self.model_count):
+            exact_matches = []
+            model_preds = preds[:, model_idx, :]  # (batch_size, seq_len)
+            
+            for batch_idx in range(batch_size):
+                # Find separator token position in target sequence
+                sep_positions = (target[batch_idx] == self.sep_token_id).nonzero(as_tuple=True)[0]
+                
+                if len(sep_positions) == 0:
+                    # No separator found, fall back to full sequence match
+                    mask = target[batch_idx] != self.pad_token_id
+                    correct_per_token = (model_preds[batch_idx] == target[batch_idx]) | ~mask
+                    exact_matches.append(correct_per_token.all().float())
+                else:
+                    # Get position after separator - this is where the answer starts
+                    sep_pos = sep_positions[0].item()
+                    answer_start = sep_pos + 1
+                    
+                    # Only check tokens after separator (ignoring pad tokens)
+                    answer_target = target[batch_idx, answer_start:]
+                    answer_pred = model_preds[batch_idx, answer_start:]
+                    
+                    # Create mask for non-pad tokens in answer portion
+                    answer_mask = answer_target != self.pad_token_id
+                    
+                    if answer_mask.sum() == 0:
+                        # No answer tokens to check
+                        exact_matches.append(torch.tensor(1.0))
+                    else:
+                        # Check if all non-pad answer tokens match
+                        correct_answer_tokens = (answer_pred == answer_target) | ~answer_mask
+                        exact_matches.append(correct_answer_tokens.all().float())
+            
+            model_exact_matches.append(torch.stack(exact_matches).mean())
+        
+        return torch.stack(model_exact_matches)
+
+    def compute_loss(self, batch):
+        """Compute loss for a batch - used by both training and validation."""
+        # Handle both old tensor format and new dict format with position_ids
+        if isinstance(batch, dict):
+            sequences = batch['input_ids']
+            position_ids = batch.get('position_ids', None)
+        else:
+            # Legacy tensor format
+            sequences = batch
+            position_ids = None
+            
+        # For next-token prediction: input = seq[:-1], target = seq[1:]
+        x = sequences[:, :-1]  # All tokens except last
+        y = sequences[:, 1:]   # All tokens except first (shifted by 1)
+        
+        # Adjust position_ids for shifted input if present
+        pos_ids = position_ids[:, :-1] if position_ids is not None else None
+        
+        logits = self(x, position_ids=pos_ids)
+        return self.loss_function(y, logits)
+
+    @torch.no_grad()
+    def pattern_search(self, x, y, loss_func):
+        """Pattern search optimization method following existing pattern."""
+        # Use the first transformer as the base and modify others
+        base_params = list(self.transformers[0].parameters())
+        
+        # Simple pattern search: try small perturbations
+        best_loss = float('inf')
+        best_model_idx = 0
+        
+        # Calculate initial loss
+        logits = self(x)
+        current_losses = self.loss_function(y, logits)
+        base_loss = current_losses[0].item()
+        
+        # Try perturbations on other models
+        for model_idx in range(1, self.model_count):
+            with torch.no_grad():
+                # Reset model to base
+                for target_param, base_param in zip(self.transformers[model_idx].parameters(), base_params):
+                    target_param.copy_(base_param)
+                
+                # Add small random perturbations
+                for param in self.transformers[model_idx].parameters():
+                    param.add_(torch.randn_like(param) * 0.01)
+        
+        # Evaluate all models
+        logits = self(x)
+        losses = self.loss_function(y, logits)
+        
+        # Find best model
+        best_idx = losses.argmin().item()
+        
+        # Copy best model to position 0
+        if best_idx != 0:
+            for target_param, best_param in zip(self.transformers[0].parameters(), self.transformers[best_idx].parameters()):
+                target_param.copy_(best_param)
+
+    @torch.no_grad()
+    def reset_parameters(self):
+        """Reset all model parameters."""
+        for transformer in self.transformers:
+            def reset_module(m):
+                if hasattr(m, 'reset_parameters'):
+                    m.reset_parameters()
+                elif hasattr(m, 'weight'):
+                    nn.init.xavier_uniform_(m.weight)
+                    if hasattr(m, 'bias') and m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+            transformer.apply(reset_module)
+
+    @torch.no_grad()
+    def reinitialize(self, mult=1):
+        """Reinitialize all model parameters with uniform distribution."""
+        for transformer in self.transformers:
+            for param in transformer.parameters():
+                nn.init.uniform_(param, -mult, mult)
+
+    def forward_normalize(self, x):
+        """Forward pass with normalization - for compatibility with existing code."""
+        return self.forward(x)
+
+    @torch.no_grad()
+    def get_weights_by_idx(self, idx):
+        """Get weights for specific model indices."""
+        if isinstance(idx, torch.Tensor):
+            idx = idx.cpu().numpy()
+        elif isinstance(idx, int):
+            idx = [idx]
+        
+        state_dicts = []
+        for i in idx:
+            state_dicts.append({k: v.clone().cpu() for k, v in self.transformers[i].state_dict().items()})
+        return state_dicts
+
+    def get_model_subsets(self, idx):
+        """Create a new TransformerModels with subset of models."""
+        if isinstance(idx, torch.Tensor):
+            idx = idx.tolist()
+        elif isinstance(idx, int):
+            idx = [idx]
+            
+        new_model_count = len(idx)
+        new_model = TransformerModels(
+            vocab_size=self.vocab_size,
+            d_model=self.d_model,
+            n_layers=self.n_layers,
+            n_heads=self.n_heads,
+            d_ff=self.d_ff,
+            max_len=self.max_len,
+            model_count=new_model_count,
+            device=self.device,
+            dropout=self.dropout,
+            sep_token_id=self.sep_token_id,
+            pad_token_id=self.pad_token_id
+        )
+        
+        # Copy the selected transformers
+        for new_idx, old_idx in enumerate(idx):
+            new_model.transformers[new_idx].load_state_dict(self.transformers[old_idx].state_dict())
+        
         return new_model
 if __name__ == "__main__":
     model = MLPModels(input_dim=2, output_dim=2,
