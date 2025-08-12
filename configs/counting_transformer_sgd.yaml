@@ -3,7 +3,6 @@ output:
   target_model_count: 100
 dataset:
   name: counting
-  seed: 100
   counting:
     min_range_size: 1
     max_range_size: 10
@@ -27,8 +26,6 @@ optimizer:
   epochs: 100
   batch_size: 8
   es_acc: 0.95
-training:
-  seed: 0
 distributed:
   loss_thres: -999,999
   num_samples: 500
