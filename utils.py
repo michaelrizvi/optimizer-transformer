@@ -863,37 +863,321 @@ class TransformerModels(nn.Module):
         self.sep_token_id = sep_token_id
         self.pad_token_id = pad_token_id
         
-        # Create multiple transformer models using grouped convolutions pattern
-        self.token_emb = nn.Embedding(vocab_size * model_count, d_model)
+        # Vectorized parameters following LeNet pattern
+        # Token embeddings: (model_count, vocab_size, d_model)
+        self.token_emb_weight = nn.Parameter(torch.randn(model_count, vocab_size, d_model))
+        
+        # Position embeddings: (model_count, max_len, d_model)  
         self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
         
-        # Create transformer blocks - we'll use multiple separate transformers
-        self.transformers = nn.ModuleList([
-            DecoderOnlyTransformer(vocab_size, d_model, n_layers, n_heads, d_ff, max_len, dropout)
-            for _ in range(model_count)
-        ])
+        # Transformer layer parameters
+        self.transformer_params = nn.ParameterDict()
+        
+        for layer in range(n_layers):
+            # Layer norm 1
+            self.transformer_params[f'ln1_{layer}_weight'] = nn.Parameter(torch.ones(model_count, d_model))
+            self.transformer_params[f'ln1_{layer}_bias'] = nn.Parameter(torch.zeros(model_count, d_model))
+            
+            # Attention QKV projection: (model_count, d_model, 3*d_model)
+            self.transformer_params[f'attn_{layer}_qkv_weight'] = nn.Parameter(torch.randn(model_count, d_model, 3*d_model))
+            self.transformer_params[f'attn_{layer}_qkv_bias'] = nn.Parameter(torch.zeros(model_count, 3*d_model))
+            
+            # Attention output projection: (model_count, d_model, d_model)
+            self.transformer_params[f'attn_{layer}_out_weight'] = nn.Parameter(torch.randn(model_count, d_model, d_model))
+            self.transformer_params[f'attn_{layer}_out_bias'] = nn.Parameter(torch.zeros(model_count, d_model))
+            
+            # Layer norm 2
+            self.transformer_params[f'ln2_{layer}_weight'] = nn.Parameter(torch.ones(model_count, d_model))
+            self.transformer_params[f'ln2_{layer}_bias'] = nn.Parameter(torch.zeros(model_count, d_model))
+            
+            # Feed forward 1: (model_count, d_model, d_ff)
+            self.transformer_params[f'ff1_{layer}_weight'] = nn.Parameter(torch.randn(model_count, d_model, d_ff))
+            self.transformer_params[f'ff1_{layer}_bias'] = nn.Parameter(torch.zeros(model_count, d_ff))
+            
+            # Feed forward 2: (model_count, d_ff, d_model)
+            self.transformer_params[f'ff2_{layer}_weight'] = nn.Parameter(torch.randn(model_count, d_ff, d_model))
+            self.transformer_params[f'ff2_{layer}_bias'] = nn.Parameter(torch.zeros(model_count, d_model))
+        
+        # Final layer norm
+        self.ln_f_weight = nn.Parameter(torch.ones(model_count, d_model))
+        self.ln_f_bias = nn.Parameter(torch.zeros(model_count, d_model))
+        
+        # Output projection: (model_count, d_model, vocab_size)
+        self.head_weight = nn.Parameter(torch.randn(model_count, d_model, vocab_size))
+        self.head_bias = nn.Parameter(torch.zeros(model_count, vocab_size))
+        
+        # Pattern search state
         self.basis_list = None
         self.curr_idx = 0
         self.radius = 0.1
-        self.best_loss = None
+        
+        # Initialize parameters
+        self._init_vectorized_params()
 
-    def forward(self, x, position_ids=None):
-        # x shape: (batch_size, seq_len)
-        # Output shape: (batch_size, model_count, seq_len, vocab_size)
-        return self.forward_batch(x, self.model_count, position_ids)
-    
-    def forward_batch(self, x, num_active_transformers, position_ids=None):
-        """Forward pass using only the first num_active_transformers."""
+    def _init_vectorized_params(self):
+        """Initialize parameters using Xavier/Kaiming initialization."""
+        with torch.no_grad():
+            # Initialize token embeddings
+            nn.init.normal_(self.token_emb_weight, mean=0.0, std=0.02)
+            
+            # Initialize position embeddings 
+            nn.init.zeros_(self.pos_emb)
+            
+            # Initialize transformer layer parameters
+            for layer in range(self.n_layers):
+                # Layer norm weights to 1, biases to 0 (already done)
+                
+                # QKV projection - Xavier uniform
+                nn.init.xavier_uniform_(self.transformer_params[f'attn_{layer}_qkv_weight'])
+                nn.init.zeros_(self.transformer_params[f'attn_{layer}_qkv_bias'])
+                
+                # Attention output projection
+                nn.init.xavier_uniform_(self.transformer_params[f'attn_{layer}_out_weight'])  
+                nn.init.zeros_(self.transformer_params[f'attn_{layer}_out_bias'])
+                
+                # Feed forward layers
+                nn.init.xavier_uniform_(self.transformer_params[f'ff1_{layer}_weight'])
+                nn.init.zeros_(self.transformer_params[f'ff1_{layer}_bias'])
+                nn.init.xavier_uniform_(self.transformer_params[f'ff2_{layer}_weight'])
+                nn.init.zeros_(self.transformer_params[f'ff2_{layer}_bias'])
+            
+            # Final layer norm (already initialized to 1s and 0s)
+            # Output head
+            nn.init.xavier_uniform_(self.head_weight)
+            nn.init.zeros_(self.head_bias)
+
+    def vectorized_token_embedding(self, x):
+        """Vectorized token embedding lookup across all models.
+        
+        Args:
+            x: (batch_size, seq_len) - input token ids
+            
+        Returns:
+            (batch_size, model_count, seq_len, d_model) - embeddings for all models
+        """
         batch_size, seq_len = x.size()
         
-        outputs = []
-        for i in range(num_active_transformers):
-            out = self.transformers[i](x, position_ids)  # (batch_size, seq_len, vocab_size)
-            outputs.append(out.unsqueeze(1))  # (batch_size, 1, seq_len, vocab_size)
+        # Ensure x has the correct integer dtype
+        x = x.long()
         
-        # Stack along model dimension
-        outputs = torch.cat(outputs, dim=1)  # (batch_size, num_active_transformers, seq_len, vocab_size)
-        return outputs
+        # self.token_emb_weight: (model_count, vocab_size, d_model)
+        # We need to gather embeddings for each model separately
+        embeddings = torch.zeros(batch_size, self.model_count, seq_len, self.d_model, 
+                                 device=x.device, dtype=self.token_emb_weight.dtype)
+        
+        for model_idx in range(self.model_count):
+            # Get embeddings for this model: (batch_size, seq_len, d_model)
+            model_embeddings = F.embedding(x, self.token_emb_weight[model_idx])
+            embeddings[:, model_idx] = model_embeddings
+            
+        return embeddings
+
+    def vectorized_position_embedding(self, position_ids):
+        """Vectorized position embedding lookup.
+        
+        Args:
+            position_ids: (batch_size, seq_len) - position indices
+            
+        Returns:
+            (batch_size, model_count, seq_len, d_model) - position embeddings
+        """
+        batch_size, seq_len = position_ids.size()
+        
+        # Ensure position_ids has the correct integer dtype
+        position_ids = position_ids.long()
+        
+        # Similar to token embeddings
+        pos_embeddings = torch.zeros(batch_size, self.model_count, seq_len, self.d_model,
+                                     device=position_ids.device, dtype=self.pos_emb.dtype)
+        
+        for model_idx in range(self.model_count):
+            # Gather position embeddings for this model
+            model_pos_emb = torch.gather(
+                self.pos_emb[model_idx].unsqueeze(0).expand(batch_size, -1, -1),
+                1,
+                position_ids.unsqueeze(-1).expand(-1, -1, self.d_model)
+            )
+            pos_embeddings[:, model_idx] = model_pos_emb
+            
+        return pos_embeddings
+
+    def vectorized_layer_norm(self, x, weight, bias):
+        """Vectorized layer normalization.
+        
+        Args:
+            x: (batch_size, model_count, seq_len, d_model)
+            weight: (model_count, d_model) 
+            bias: (model_count, d_model)
+            
+        Returns:
+            (batch_size, model_count, seq_len, d_model) - normalized
+        """
+        # Layer norm along the last dimension (d_model)
+        mean = x.mean(dim=-1, keepdim=True)  # (batch_size, model_count, seq_len, 1)
+        var = x.var(dim=-1, unbiased=False, keepdim=True)  # (batch_size, model_count, seq_len, 1)
+        
+        normalized = (x - mean) / torch.sqrt(var + 1e-5)
+        
+        # Apply per-model weight and bias
+        # weight/bias: (model_count, d_model) -> (1, model_count, 1, d_model)
+        weight = weight.unsqueeze(0).unsqueeze(2)
+        bias = bias.unsqueeze(0).unsqueeze(2) 
+        
+        return normalized * weight + bias
+
+    def vectorized_attention(self, x, layer_idx):
+        """Vectorized multi-head self-attention with causal masking.
+        
+        Args:
+            x: (batch_size, model_count, seq_len, d_model)
+            layer_idx: which transformer layer
+            
+        Returns:
+            (batch_size, model_count, seq_len, d_model) - attention output
+        """
+        batch_size, model_count, seq_len, d_model = x.size()
+        
+        # Get QKV weights and biases for this layer
+        qkv_weight = self.transformer_params[f'attn_{layer_idx}_qkv_weight']  # (model_count, d_model, 3*d_model)
+        qkv_bias = self.transformer_params[f'attn_{layer_idx}_qkv_bias']      # (model_count, 3*d_model)
+        out_weight = self.transformer_params[f'attn_{layer_idx}_out_weight']  # (model_count, d_model, d_model)
+        out_bias = self.transformer_params[f'attn_{layer_idx}_out_bias']      # (model_count, d_model)
+        
+        # Vectorized QKV projection
+        # x: (batch_size, model_count, seq_len, d_model)
+        # qkv_weight: (model_count, d_model, 3*d_model)
+        qkv = torch.einsum('bmsd,mde->bmse', x, qkv_weight) + qkv_bias.unsqueeze(0).unsqueeze(2)
+        # qkv: (batch_size, model_count, seq_len, 3*d_model)
+        
+        # Reshape and split into Q, K, V
+        qkv = qkv.reshape(batch_size, model_count, seq_len, self.n_heads, 3 * self.d_model // self.n_heads)
+        qkv = qkv.transpose(2, 3)  # (batch_size, model_count, n_heads, seq_len, 3*head_dim)
+        q, k, v = qkv.chunk(3, dim=-1)  # Each: (batch_size, model_count, n_heads, seq_len, head_dim)
+        
+        # Compute attention scores
+        head_dim = self.d_model // self.n_heads
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (head_dim ** 0.5)
+        # attn_scores: (batch_size, model_count, n_heads, seq_len, seq_len)
+        
+        # Apply causal mask
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        attn_scores = attn_scores.masked_fill(causal_mask == 0, float('-inf'))
+        
+        # Softmax and dropout
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
+        
+        # Apply attention to values
+        attn_out = torch.matmul(attn_weights, v)  # (batch_size, model_count, n_heads, seq_len, head_dim)
+        
+        # Concatenate heads
+        attn_out = attn_out.transpose(2, 3).contiguous().reshape(batch_size, model_count, seq_len, d_model)
+        
+        # Output projection
+        output = torch.einsum('bmsd,mde->bmse', attn_out, out_weight) + out_bias.unsqueeze(0).unsqueeze(2)
+        
+        return output
+
+    def vectorized_feed_forward(self, x, layer_idx):
+        """Vectorized feed forward network.
+        
+        Args:
+            x: (batch_size, model_count, seq_len, d_model)
+            layer_idx: which transformer layer
+            
+        Returns:
+            (batch_size, model_count, seq_len, d_model)
+        """
+        # Get FF weights and biases
+        ff1_weight = self.transformer_params[f'ff1_{layer_idx}_weight']  # (model_count, d_model, d_ff)
+        ff1_bias = self.transformer_params[f'ff1_{layer_idx}_bias']      # (model_count, d_ff)
+        ff2_weight = self.transformer_params[f'ff2_{layer_idx}_weight']  # (model_count, d_ff, d_model)
+        ff2_bias = self.transformer_params[f'ff2_{layer_idx}_bias']      # (model_count, d_model)
+        
+        # First linear layer + ReLU
+        hidden = torch.einsum('bmsd,mde->bmse', x, ff1_weight) + ff1_bias.unsqueeze(0).unsqueeze(2)
+        hidden = F.relu(hidden)
+        
+        # Dropout
+        hidden = F.dropout(hidden, p=self.dropout, training=self.training)
+        
+        # Second linear layer
+        output = torch.einsum('bmsd,mde->bmse', hidden, ff2_weight) + ff2_bias.unsqueeze(0).unsqueeze(2)
+        
+        return output
+
+    def vectorized_transformer_layer(self, x, layer_idx):
+        """Complete transformer layer with residual connections.
+        
+        Args:
+            x: (batch_size, model_count, seq_len, d_model)
+            layer_idx: which transformer layer
+            
+        Returns:
+            (batch_size, model_count, seq_len, d_model)
+        """
+        # Pre-norm attention
+        ln1_weight = self.transformer_params[f'ln1_{layer_idx}_weight']
+        ln1_bias = self.transformer_params[f'ln1_{layer_idx}_bias']
+        normed_x = self.vectorized_layer_norm(x, ln1_weight, ln1_bias)
+        
+        # Self-attention with residual connection
+        attn_out = self.vectorized_attention(normed_x, layer_idx)
+        x = x + attn_out
+        
+        # Pre-norm feed forward
+        ln2_weight = self.transformer_params[f'ln2_{layer_idx}_weight'] 
+        ln2_bias = self.transformer_params[f'ln2_{layer_idx}_bias']
+        normed_x = self.vectorized_layer_norm(x, ln2_weight, ln2_bias)
+        
+        # Feed forward with residual connection
+        ff_out = self.vectorized_feed_forward(normed_x, layer_idx)
+        x = x + ff_out
+        
+        return x
+
+    def vectorized_output_projection(self, x):
+        """Final output projection to vocabulary.
+        
+        Args:
+            x: (batch_size, model_count, seq_len, d_model)
+            
+        Returns:
+            (batch_size, model_count, seq_len, vocab_size)
+        """
+        # self.head_weight: (model_count, d_model, vocab_size)
+        # self.head_bias: (model_count, vocab_size)
+        logits = torch.einsum('bmsd,mdv->bmsv', x, self.head_weight) + self.head_bias.unsqueeze(0).unsqueeze(2)
+        return logits
+
+    def forward(self, x, position_ids=None):
+        # x shape: (batch_size, seq_len)  
+        # Output shape: (batch_size, model_count, seq_len, vocab_size)
+        batch_size, seq_len = x.size()
+        
+        # Token embeddings - vectorized across models
+        token_emb = self.vectorized_token_embedding(x)  # (batch_size, model_count, seq_len, d_model)
+        
+        # Position embeddings
+        if position_ids is not None:
+            pos_emb = self.vectorized_position_embedding(position_ids)
+        else:
+            pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
+        
+        # Add embeddings
+        hidden = token_emb + pos_emb  # (batch_size, model_count, seq_len, d_model)
+        
+        # Pass through transformer layers
+        for layer_idx in range(self.n_layers):
+            hidden = self.vectorized_transformer_layer(hidden, layer_idx)
+            
+        # Final layer norm
+        hidden = self.vectorized_layer_norm(hidden, self.ln_f_weight, self.ln_f_bias)
+        
+        # Output projection
+        logits = self.vectorized_output_projection(hidden)  # (batch_size, model_count, seq_len, vocab_size)
+        
+        return logits
 
     def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """Cross entropy loss ignoring pad tokens."""
@@ -1010,28 +1294,13 @@ class TransformerModels(nn.Module):
         
         logits = self(x, position_ids=pos_ids)
         return self.loss_function(y, logits)
-    
-    def get_optimal_batch_size(self):
-        """Determine optimal batch size for pattern search based on available models and memory."""
-        available_models = self.model_count - 1  # Reserve transformer[0] as baseline
-        
-        if available_models <= 0:
-            return 1
-        
-        # Conservative batch size limits
-        if torch.cuda.is_available():
-            max_batch_size = min(available_models, 64)  # Cap at reasonable limit for GPU
-        else:
-            max_batch_size = min(available_models, 16)  # Smaller for CPU
-        
-        return max_batch_size
 
     @torch.no_grad()
     def pattern_search(self, data, dummy_labels, loss_func):
-        """Fast batch evaluation pattern search for ModuleList transformers."""
+        """Vectorized batch evaluation pattern search following LeNet design pattern."""
         import random
         
-        # Create x and y for next-token prediction
+        # Create x and y for next-token prediction (same as before)
         x = data[:, :-1]
         y = data[:, 1:]
         
@@ -1039,75 +1308,85 @@ class TransformerModels(nn.Module):
         if self.basis_list is None:
             self.basis_list = []
             
-            # Only iterate over transformer[0] parameters since we copy it to all others anyway
-            transformer_0 = self.transformers[0]
-            for param_name, param in transformer_0.named_parameters():
-                param_flat = param.data.view(-1)
-                for param_idx in range(param_flat.shape[0]):
-                    # Each basis element: (param_name, param_flat_idx, direction)
-                    self.basis_list.append((param_name, param_idx, "+"))
-                    self.basis_list.append((param_name, param_idx, "-"))
+            # Create basis list for all vectorized parameters
+            for param_name, param in self.named_parameters():
+                # Check if this is a vectorized parameter (first dimension is model_count)
+                if param.dim() >= 2 and param.size(0) == self.model_count:
+                    # Get shape without model_count dimension
+                    param_shape = param.shape[1:]  # Remove model_count dimension
+                    param_size = param_shape.numel()
+                    
+                    for param_idx in range(param_size):
+                        # Each basis element: (param_name, param_flat_idx, direction)
+                        self.basis_list.append((param_name, param_idx, "+"))
+                        self.basis_list.append((param_name, param_idx, "-"))
             
             random.shuffle(self.basis_list)
+            print(f"Created basis list with {len(self.basis_list)} elements")
         
         # Initialize best loss if needed
-        if self.best_loss is None:
-            # Get initial loss using only transformer[0]
-            pred = self.forward_batch(x, 1, position_ids=None)  # Only evaluate transformer[0]
-            self.best_loss = self.loss_function(y, pred)[0].detach().clone()
+        if not hasattr(self, 'best_loss') or self.best_loss is None:
+            # Get initial loss - forward pass returns (batch_size, model_count, seq_len, vocab_size)
+            logits = self(x, position_ids=None)
+            initial_losses = self.loss_function(y, logits)  # (model_count,)
+            self.best_loss = initial_losses[0].detach().clone()  # Use model 0 as baseline
         
-        # Save original state of transformer[0]
-        original_state = self.transformers[0].state_dict()
+        # Copy model 0 parameters to all other models (LeNet pattern)
+        self._copy_model_0_to_all()
         
-        # Get optimal batch size for this hardware/model configuration
-        batch_size = self.get_optimal_batch_size()
+        # Process basis list in chunks that fit within model_count
+        max_perturbations_per_batch = self.model_count - 1  # Reserve model 0 as baseline
         
-        # Process perturbations in batches
-        for batch_start in range(0, len(self.basis_list), batch_size):
-            batch_end = min(batch_start + batch_size, len(self.basis_list))
-            current_batch = self.basis_list[batch_start:batch_end]
+        for basis_start in range(0, len(self.basis_list), max_perturbations_per_batch):
+            basis_end = min(basis_start + max_perturbations_per_batch, len(self.basis_list))
+            current_basis = self.basis_list[basis_start:basis_end]
             
-            if not current_batch:
+            if not current_basis:
                 break
             
-            # Reset all transformers to baseline (transformer[0])
-            for i in range(1, len(current_batch) + 1):
-                if i < self.model_count:  # Safety check
-                    self.transformers[i].load_state_dict(original_state)
+            # Re-copy model 0 to all others before applying perturbations
+            self._copy_model_0_to_all()
             
-            # Apply different perturbation to each transformer
-            for idx, (param_name, param_idx, direction) in enumerate(current_batch):
-                transformer_idx = idx + 1  # Skip transformer[0] (baseline)
+            # Apply different perturbations to models 1, 2, 3, ... (keep model 0 as baseline)
+            for basis_idx, (param_name, param_flat_idx, direction) in enumerate(current_basis):
+                model_idx = basis_idx + 1  # Start from model 1 (model 0 is baseline)
                 
-                if transformer_idx >= self.model_count:
+                if model_idx >= self.model_count:
                     break  # Safety check
                 
-                target_param = dict(self.transformers[transformer_idx].named_parameters())[param_name]
-                target_param_flat = target_param.data.view(-1)
+                # Get the parameter and apply perturbation
+                param = dict(self.named_parameters())[param_name]
                 
+                # Convert flat index back to multidimensional index for the parameter
+                param_shape = param.shape[1:]  # Shape without model_count dimension
+                multi_idx = torch.unravel_index(torch.tensor(param_flat_idx), param_shape)
+                
+                # Create full index including model dimension
+                full_idx = tuple([model_idx] + [idx.item() for idx in multi_idx])
+                
+                # Apply perturbation
                 if direction == "+":
-                    target_param_flat[param_idx] += self.radius
+                    param.data[full_idx] += self.radius
                 else:
-                    target_param_flat[param_idx] -= self.radius
+                    param.data[full_idx] -= self.radius
             
-            # BATCH EVALUATION - One forward pass for all perturbations + baseline
-            active_transformers = len(current_batch) + 1  # +1 for baseline transformer[0]
-            pred = self.forward_batch(x, active_transformers, position_ids=None)
-            loss = self.loss_function(y, pred)
+            # BATCH EVALUATION - One forward pass for baseline + all perturbations
+            logits = self(x, position_ids=None)  # (batch_size, model_count, seq_len, vocab_size)
+            losses = self.loss_function(y, logits)  # (model_count,)
             
-            # Check if any perturbation is better than baseline
-            baseline_loss = loss[0]  # Loss of transformer[0]
+            # Check if any perturbation improved over baseline
+            baseline_loss = losses[0]  # Model 0 loss
             
-            if len(loss) > 1:  # We have perturbations to compare
-                perturbation_losses = loss[1:]  # Losses of perturbed models
+            if len(current_basis) > 0:
+                # Get losses for the perturbed models 
+                perturbation_losses = losses[1:len(current_basis)+1]
                 best_perturbation_idx = perturbation_losses.argmin()
                 best_perturbation_loss = perturbation_losses[best_perturbation_idx]
                 
                 if best_perturbation_loss < self.best_loss:
-                    # Found improvement! Copy best perturbation to transformer[0]
-                    best_transformer_idx = best_perturbation_idx + 1
-                    best_state = self.transformers[best_transformer_idx].state_dict()
-                    self.transformers[0].load_state_dict(best_state)
+                    # Found improvement! Copy best perturbation parameters to model 0
+                    best_model_idx = best_perturbation_idx + 1
+                    self._copy_model_to_model_0(best_model_idx)
                     
                     old_loss = self.best_loss
                     self.best_loss = best_perturbation_loss.detach().clone()
@@ -1121,28 +1400,34 @@ class TransformerModels(nn.Module):
         if self.radius < 1e-8:
             print("Pattern search: radius too small, stopping")
             return
-        
-        # Shuffle for next iteration
-        random.shuffle(self.basis_list)
+    
+    def _copy_model_0_to_all(self):
+        """Copy model 0 parameters to all other models (LeNet pattern)."""
+        for param in self.parameters():
+            if param.dim() >= 2 and param.size(0) == self.model_count:
+                # This is a vectorized parameter with model_count as first dimension
+                with torch.no_grad():
+                    # Copy model 0 to all other models
+                    param.data[1:] = param.data[0:1].expand_as(param.data[1:])
+    
+    def _copy_model_to_model_0(self, source_model_idx):
+        """Copy parameters from source_model_idx to model 0."""
+        for param in self.parameters():
+            if param.dim() >= 2 and param.size(0) == self.model_count:
+                # This is a vectorized parameter with model_count as first dimension
+                with torch.no_grad():
+                    param.data[0] = param.data[source_model_idx].clone()
 
     @torch.no_grad()
     def reset_parameters(self):
-        """Reset all model parameters."""
-        for transformer in self.transformers:
-            def reset_module(m):
-                if hasattr(m, 'reset_parameters'):
-                    m.reset_parameters()
-                elif hasattr(m, 'weight'):
-                    nn.init.xavier_uniform_(m.weight)
-                    if hasattr(m, 'bias') and m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-            transformer.apply(reset_module)
+        """Reset all model parameters using proper initialization."""
+        self._init_vectorized_params()
 
     @torch.no_grad()
     def reinitialize(self, mult=1):
         """Reinitialize all model parameters with uniform distribution."""
-        for transformer in self.transformers:
-            for param in transformer.parameters():
+        with torch.no_grad():
+            for param in self.parameters():
                 nn.init.uniform_(param, -mult, mult)
 
     def forward_normalize(self, x):
@@ -1151,7 +1436,7 @@ class TransformerModels(nn.Module):
 
     @torch.no_grad()
     def get_weights_by_idx(self, idx):
-        """Get weights for specific model indices."""
+        """Get weights for specific model indices from vectorized parameters."""
         if isinstance(idx, torch.Tensor):
             if idx.dtype == torch.bool:
                 # Convert boolean tensor to integer indices
@@ -1161,10 +1446,30 @@ class TransformerModels(nn.Module):
         elif isinstance(idx, int):
             idx = [idx]
         
-        state_dicts = []
-        for i in idx:
-            state_dicts.append({k: v.clone().cpu() for k, v in self.transformers[i].state_dict().items()})
-        return state_dicts
+        weights_list = []
+        for model_idx in idx:
+            model_weights = {}
+            
+            # Extract parameters for this specific model
+            model_weights['token_emb_weight'] = self.token_emb_weight[model_idx].clone().cpu()
+            model_weights['pos_emb'] = self.pos_emb[model_idx].clone().cpu()
+            model_weights['ln_f_weight'] = self.ln_f_weight[model_idx].clone().cpu()
+            model_weights['ln_f_bias'] = self.ln_f_bias[model_idx].clone().cpu()
+            model_weights['head_weight'] = self.head_weight[model_idx].clone().cpu()
+            model_weights['head_bias'] = self.head_bias[model_idx].clone().cpu()
+            
+            # Extract transformer layer parameters
+            for layer_idx in range(self.n_layers):
+                for param_key in ['ln1_weight', 'ln1_bias', 'attn_qkv_weight', 'attn_qkv_bias',
+                                  'attn_out_weight', 'attn_out_bias', 'ln2_weight', 'ln2_bias',
+                                  'ff1_weight', 'ff1_bias', 'ff2_weight', 'ff2_bias']:
+                    full_key = f'{param_key}_{layer_idx}' if layer_idx > 0 else param_key
+                    if full_key in self.transformer_params:
+                        model_weights[full_key] = self.transformer_params[full_key][model_idx].clone().cpu()
+            
+            weights_list.append(model_weights)
+        
+        return weights_list
 
     def get_model_subsets(self, idx):
         """Create a new TransformerModels with subset of models."""
@@ -1188,9 +1493,20 @@ class TransformerModels(nn.Module):
             pad_token_id=self.pad_token_id
         )
         
-        # Copy the selected transformers
-        for new_idx, old_idx in enumerate(idx):
-            new_model.transformers[new_idx].load_state_dict(self.transformers[old_idx].state_dict())
+        # Copy the selected model parameters
+        with torch.no_grad():
+            for new_idx, old_idx in enumerate(idx):
+                # Copy basic parameters
+                new_model.token_emb_weight.data[new_idx] = self.token_emb_weight.data[old_idx]
+                new_model.pos_emb.data[new_idx] = self.pos_emb.data[old_idx]
+                new_model.ln_f_weight.data[new_idx] = self.ln_f_weight.data[old_idx]
+                new_model.ln_f_bias.data[new_idx] = self.ln_f_bias.data[old_idx]
+                new_model.head_weight.data[new_idx] = self.head_weight.data[old_idx]
+                new_model.head_bias.data[new_idx] = self.head_bias.data[old_idx]
+                
+                # Copy transformer layer parameters
+                for param_name in self.transformer_params:
+                    new_model.transformer_params[param_name].data[new_idx] = self.transformer_params[param_name].data[old_idx]
         
         return new_model
 if __name__ == "__main__":
