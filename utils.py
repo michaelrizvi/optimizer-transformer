@@ -897,16 +897,29 @@ class TransformerModels(nn.Module):
 
     def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """Cross entropy loss ignoring pad tokens."""
-        # Reshape if needed: (B, M, S, V) -> (B*M*S, V)
-        if logits.dim() > 2:
-            logits = logits.reshape(-1, logits.size(-1))
+        # Infer actual model count from logits tensor
+        if logits.dim() == 4:  # (B, M, S, V)
+            actual_model_count = logits.size(1)
+            logits = logits.reshape(-1, logits.size(-1))  # (B*M*S, V)
+        elif logits.dim() == 3:  # (B, S, V) - single model case
+            actual_model_count = 1
+            logits = logits.reshape(-1, logits.size(-1))  # (B*S, V)
+        else:  # Already flattened
+            # Try to infer from target and logits shapes
+            if target.dim() == 2:
+                batch_size, seq_len = target.size()
+                expected_tokens = batch_size * seq_len
+                actual_tokens = logits.size(0)
+                actual_model_count = actual_tokens // expected_tokens
+            else:
+                actual_model_count = 1
         
-        # Reshape target: (B, S) -> (B*S) and repeat for all models
+        # Reshape target: (B, S) -> (B*S) and repeat for actual models
         if target.dim() == 2:
             batch_size, seq_len = target.size()
-            target = target.unsqueeze(1).expand(-1, self.model_count, -1).reshape(-1)
+            target = target.unsqueeze(1).expand(-1, actual_model_count, -1).reshape(-1)
         elif target.dim() == 1:
-            target = target.repeat(self.model_count)
+            target = target.repeat(actual_model_count)
             
         # Ignore pad tokens for loss calculation
         mask = target != self.pad_token_id
@@ -915,16 +928,12 @@ class TransformerModels(nn.Module):
         
         loss = torch.nn.functional.cross_entropy(filtered_logits, filtered_target, reduction='none')
         
-        # Reshape loss back to (batch_size * model_count,) then (batch_size, model_count)
-        # This is tricky - we need to figure out how many valid tokens per sequence
-        valid_tokens_per_seq = mask.view(-1, self.model_count).sum(dim=0)  # tokens per model
-        
         # For simplicity, let's compute loss per model
         losses = []
-        mask_reshaped = mask.view(-1, self.model_count)  # (total_tokens, model_count)
+        mask_reshaped = mask.view(-1, actual_model_count)  # (total_tokens, actual_model_count)
         loss_idx = 0
         
-        for model_idx in range(self.model_count):
+        for model_idx in range(actual_model_count):
             model_mask = mask_reshaped[:, model_idx]
             model_valid_count = model_mask.sum().item()
             if model_valid_count > 0:
