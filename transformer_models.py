@@ -123,6 +123,7 @@ class TransformerModels(nn.Module):
         self.basis_list = None
         self.curr_idx = 0
         self.radius = 1.0
+        self.successful_directions = {}  # Track successful parameter modifications
         
         # Initialize parameters properly
         self._init_multi_model_params()
@@ -309,36 +310,44 @@ class TransformerModels(nn.Module):
         max_attempts = min(len(self.basis_list), self.model_count - 1)
 
         while True:
-            # Replicate the first model across all model copies
-            for para in self.parameters():
+            # Store original parameters of model 0 for consistent base
+            model_0_params = {}
+            for name, para in self.named_parameters():
                 original_shape = para.shape
                 if len(original_shape) >= 2:
-                    # 2D+ parameters: reshape correctly
                     para_reshaped = para.data.view(self.model_count, -1)
-                    para_reshaped[1:] = para_reshaped[0:1]
+                    model_0_params[name] = para_reshaped[0].clone()
                 elif len(original_shape) == 1 and original_shape[0] % self.model_count == 0:
-                    # 1D parameters that are model-specific
                     para_reshaped = para.data.view(self.model_count, -1)
-                    para_reshaped[1:] = para_reshaped[0:1]
-
-            # Modify each model at one parameter location
+                    model_0_params[name] = para_reshaped[0].clone()
+            
+            # Apply modifications to each model using consistent base
             improvements_found = 0
+            modifications = []  # Track all modifications for this iteration
+            
             for i in range(1, min(self.model_count, max_attempts + 1)):
                 if self.curr_idx >= len(self.basis_list):
                     break
                     
                 original_para, para_flatten, p_i, op, param_name = self.basis_list[self.curr_idx]
                 
+                # Reset to model 0 parameters first
+                if param_name in model_0_params:
+                    para_flatten[i] = model_0_params[param_name].clone()
+                
+                # Apply modification
                 if op == "+":
                     para_flatten[i, p_i] += self.radius
                 else:
                     para_flatten[i, p_i] -= self.radius
+                    
+                modifications.append((i, param_name, p_i, op))
                 self.curr_idx += 1
 
             # Forward pass and select best model
             pred = self.forward_normalize(x)  # (batch_size, model_count, seq_len, vocab_size)
             loss = self.loss_function(y, pred)
-            best_idx = loss.min(dim=0).indices
+            best_idx = loss.argmin()  # Fix: use argmin() for 1D tensor
             best_loss = loss[best_idx]
 
             # Copy best model to position 0, but only if it's better
@@ -354,13 +363,19 @@ class TransformerModels(nn.Module):
                         para_reshaped[0] = para_reshaped[best_idx]
                 improvements_found += 1
                 
+                # Track successful modification for adaptive search
+                if best_idx > 0 and best_idx-1 < len(modifications):
+                    _, param_name, p_i, op = modifications[best_idx-1]
+                    key = f"{param_name}_{p_i}_{op}"
+                    self.successful_directions[key] = self.successful_directions.get(key, 0) + 1
+                
             # Check termination conditions
             if self.curr_idx >= len(self.basis_list):
                 if improvements_found == 0:
                     # No improvements found in full sweep, reduce radius
-                    self.radius *= 0.5
+                    self.radius *= 0.8  # Less aggressive reduction
                     print(f"Pattern search: radius reduced to {self.radius:.6f}")
-                    if self.radius < 1e-8:
+                    if self.radius < 1e-10:  # Smaller threshold
                         print("Pattern search: radius too small, stopping")
                         break
                 else:
