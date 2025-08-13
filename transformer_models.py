@@ -78,11 +78,13 @@ class TransformerModels(nn.Module):
         self.dropout_layer = nn.Dropout(dropout)
         
         # Create parameters for model_count independent transformers
-        # Token embeddings - replicated for each model
-        self.token_emb = nn.Parameter(torch.randn(model_count, vocab_size, d_model))
+        # Token embeddings - replicated for each model using ModuleList
+        self.token_emb_list = nn.ModuleList([
+            nn.Embedding(vocab_size, d_model) for _ in range(model_count)
+        ])
         
-        # Position embeddings 
-        self.pos_emb = nn.Parameter(torch.randn(model_count, max_len, d_model))
+        # Position embeddings - keep as parameters to match pattern search structure
+        self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
         
         # Transformer blocks parameters - we'll store all parameters directly
         self.transformer_params = nn.ParameterDict()
@@ -132,17 +134,17 @@ class TransformerModels(nn.Module):
         """Initialize parameters for multi-model setup."""
         # Initialize all models with same weights initially
         with torch.no_grad():
-            # Token embeddings
-            nn.init.normal_(self.token_emb, std=0.02)
+            # Token embeddings - initialize all embedding layers identically
+            for i in range(self.model_count):
+                nn.init.normal_(self.token_emb_list[i].weight, std=0.02)
+                if i > 0:
+                    self.token_emb_list[i].weight.data = self.token_emb_list[0].weight.data.clone()
             
+            # Position embeddings
             nn.init.normal_(self.pos_emb, std=0.02)
             # Make all models start with same weights
             for i in range(1, self.model_count):
                 self.pos_emb[i] = self.pos_emb[0].clone()
-        
-            # Make all models start with same token embeddings
-            for i in range(1, self.model_count):
-                self.token_emb[i] = self.token_emb[0].clone()
             
             # Initialize transformer parameters
             for name, param in self.transformer_params.items():
@@ -224,12 +226,17 @@ class TransformerModels(nn.Module):
         all_logits = []
         
         for model_idx in range(self.model_count):
-            # Token embeddings
-            token_emb = F.embedding(x, self.token_emb[model_idx])  # (B, T, d_model)
+            # Token embeddings using embedding layer
+            token_emb = self.token_emb_list[model_idx](x)  # (B, T, d_model)
             
             if position_ids is not None:
-                # Use custom position indices
-                pos_emb = self.pos_emb[model_idx][position_ids]  # (B, T, d_model)
+                # Use custom position indices with gather operation
+                pos_emb_expanded = self.pos_emb[model_idx][:self.max_len].unsqueeze(0).expand(B, -1, -1)
+                pos_emb = torch.gather(
+                    pos_emb_expanded,
+                    1,
+                    position_ids.unsqueeze(-1).expand(-1, -1, self.d_model)
+                )  # (B, T, d_model)
             else:
                 # Standard sequential positions
                 pos_emb = self.pos_emb[model_idx][:T].unsqueeze(0).expand(B, -1, -1)  # (B, T, d_model)
@@ -288,7 +295,20 @@ class TransformerModels(nn.Module):
         y = data[:,1:]
         if self.basis_list is None:
             self.basis_list = []
+            
+            # Handle token embeddings separately (ModuleList structure)
+            for model_idx in range(self.model_count):
+                emb_weight = self.token_emb_list[model_idx].weight
+                emb_flatten = emb_weight.data.view(-1)
+                for p in range(emb_flatten.shape[0]):
+                    self.basis_list.append((emb_weight, emb_flatten, p, "+", f"token_emb_{model_idx}"))
+                    self.basis_list.append((emb_weight, emb_flatten, p, "-", f"token_emb_{model_idx}"))
+            
+            # Handle other parameters (transformer params, pos_emb, head)
             for name, para in self.named_parameters():
+                if name.startswith('token_emb_list'):
+                    continue  # Already handled above
+                    
                 original_shape = para.shape
                 # Handle different parameter shapes correctly
                 if len(original_shape) >= 2:
@@ -312,7 +332,16 @@ class TransformerModels(nn.Module):
         while True:
             # Store original parameters of model 0 for consistent base
             model_0_params = {}
+            
+            # Store token embedding parameters
+            for i in range(self.model_count):
+                model_0_params[f"token_emb_{i}"] = self.token_emb_list[i].weight.data.clone()
+            
+            # Store other parameters
             for name, para in self.named_parameters():
+                if name.startswith('token_emb_list'):
+                    continue  # Already handled above
+                    
                 original_shape = para.shape
                 if len(original_shape) >= 2:
                     para_reshaped = para.data.view(self.model_count, -1)
@@ -332,14 +361,23 @@ class TransformerModels(nn.Module):
                 original_para, para_flatten, p_i, op, param_name = self.basis_list[self.curr_idx]
                 
                 # Reset to model 0 parameters first
-                if param_name in model_0_params:
+                if param_name.startswith("token_emb_"):
+                    # Handle token embedding parameters specially - copy from model 0
+                    model_idx = int(param_name.split("_")[-1])
+                    if model_idx == i:
+                        para_flatten[:] = model_0_params["token_emb_0"].view(-1).clone()
+                    # Apply modification
+                    if op == "+":
+                        para_flatten[p_i] += self.radius
+                    else:
+                        para_flatten[p_i] -= self.radius
+                elif param_name in model_0_params:
                     para_flatten[i] = model_0_params[param_name].clone()
-                
-                # Apply modification
-                if op == "+":
-                    para_flatten[i, p_i] += self.radius
-                else:
-                    para_flatten[i, p_i] -= self.radius
+                    # Apply modification
+                    if op == "+":
+                        para_flatten[i, p_i] += self.radius
+                    else:
+                        para_flatten[i, p_i] -= self.radius
                     
                 modifications.append((i, param_name, p_i, op))
                 self.curr_idx += 1
@@ -353,7 +391,15 @@ class TransformerModels(nn.Module):
             # Copy best model to position 0, but only if it's better
             current_loss = loss[0]
             if best_loss < current_loss:
+                # Copy token embeddings
+                if best_idx > 0:
+                    self.token_emb_list[0].weight.data = self.token_emb_list[best_idx].weight.data.clone()
+                
+                # Copy other parameters
                 for para in self.parameters():
+                    if any(para is emb.weight for emb in self.token_emb_list):
+                        continue  # Already handled above
+                        
                     original_shape = para.shape
                     if len(original_shape) >= 2:
                         para_reshaped = para.data.view(self.model_count, -1)
@@ -398,8 +444,17 @@ class TransformerModels(nn.Module):
         for _ in range(30):
             iter_max = 100
             for i in range(iter_max):
-                # Add noise to all models except the first one
+                # Copy model 0 to all other models, then add noise
+                # Token embeddings
+                for model_idx in range(1, self.model_count):
+                    self.token_emb_list[model_idx].weight.data = self.token_emb_list[0].weight.data.clone()
+                    self.token_emb_list[model_idx].weight.data += torch.randn_like(self.token_emb_list[model_idx].weight.data) * self.radius
+                
+                # Other parameters
                 for para in self.parameters():
+                    if any(para is emb.weight for emb in self.token_emb_list):
+                        continue  # Already handled above
+                        
                     original_shape = para.shape
                     if len(original_shape) >= 2:
                         # 2D+ parameters: reshape correctly
@@ -424,7 +479,16 @@ class TransformerModels(nn.Module):
                 best_idx = loss.min(dim=0).indices
 
                 # Copy best model to all positions
+                # Token embeddings
+                for model_idx in range(self.model_count):
+                    if model_idx != best_idx:
+                        self.token_emb_list[model_idx].weight.data = self.token_emb_list[best_idx].weight.data.clone()
+                
+                # Other parameters
                 for para in self.parameters():
+                    if any(para is emb.weight for emb in self.token_emb_list):
+                        continue  # Already handled above
+                        
                     original_shape = para.shape
                     if len(original_shape) >= 2:
                         para_reshaped = para.data.view(self.model_count, -1)
@@ -461,7 +525,17 @@ class TransformerModels(nn.Module):
     def get_weights_by_idx(self, idx):
         """Extract weights for specific model indices with improved parameter handling."""
         weight_dict = {}
+        
+        # Handle token embeddings separately
+        for i, model_idx in enumerate(idx):
+            emb_weight = self.token_emb_list[model_idx].weight.data
+            weight_dict[f'token_emb_list.{i}.weight'] = emb_weight.clone().detach().cpu()
+        
+        # Handle other parameters
         for name, para in self.state_dict().items():
+            if name.startswith('token_emb_list'):
+                continue  # Already handled above
+                
             original_shape = para.shape
             
             # Handle different parameter shapes correctly
