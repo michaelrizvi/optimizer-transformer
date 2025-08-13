@@ -399,15 +399,15 @@ def train_nm(train_data, train_labels, test_data, test_labels, model, loss_func,
 @torch.no_grad()
 def train_ps(train_data, train_labels, test_data, test_labels, model, loss_func, optimizer, epochs, es_acc=2):
     for epoch in range(epochs):
-        optimizer.step(lambda: calculate_loss_acc(train_data, train_labels, model.forward_normalize, loss_func)[0][0])
+        optimizer.step(lambda: calculate_loss_acc(train_data, train_labels, model, loss_func)[0][0])
         if epoch % (epochs // 100) == 0:
-            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model.forward_normalize, loss_func)
-            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model.forward_normalize, loss_func)
+            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
+            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
             print(
-                f"epoch {epoch} - train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}, train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}")
+                f"epoch {epoch} - train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}, train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}")
             print(
                 f"epoch {epoch} - test acc: {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
-            if train_acc >= es_acc:
+            if train_acc.mean() >= es_acc:
                 break
 
 @section('optimizer')
@@ -513,8 +513,8 @@ if __name__ == "__main__":
     config.summary()
     config_ns = config.get()
     calculate_loss_acc = get_loss_and_acc_calculation()
- 
-    
+    print(calculate_loss_acc)
+
     loss_thres = [float(v) for v in config['distributed.loss_thres'].split(",")]
     loss_bins = [(low, up) for low, up in zip(loss_thres[:-1], loss_thres[1:])]
     num_samples = [int(v) for v in config['distributed.num_samples'].split(",")]
@@ -589,13 +589,13 @@ if __name__ == "__main__":
                 if train_acc.max() > prior_max:
                     print("max train acc:", train_acc.max().detach().cpu().item())
                     prior_max = train_acc.max()
-                print("tested_model_count", tested_model_count)
             # filtering models based on loss threshold
-            perfect_model_idxs = ((es_l< train_loss) & (train_loss <= es_u) & (train_acc.to(train_loss.device) == 1.0))
-
+            perfect_model_idxs = ((es_l< train_loss) & (train_loss <= es_u) & (train_acc.to(train_loss.device) >= config['optimizer.es_acc']))
             perfect_model_count_cur = perfect_model_idxs.sum().detach().cpu().item()
             perfect_model_count += perfect_model_count_cur
             tested_model_count += cur_model_count
+            print("perfect model count", perfect_model_count)
+            print("tested model count", tested_model_count)
             if perfect_model_idxs.sum() > 0:
                 if perfect_model_count > target_model_count_subrun:
                     remain_count = perfect_model_count_cur - (perfect_model_count - target_model_count_subrun)
@@ -605,91 +605,91 @@ if __name__ == "__main__":
                     perfect_model_weights.append(model_result.get_weights_by_idx(perfect_model_idxs))
         if len(perfect_model_weights) == 0:
             print(f"Failed to find a good model for set up {cur_num_samples} {cur_loss_bin}")
-        else:
-            train_time = time.time() - start_time
-            print("="*50)
+        train_time = time.time() - start_time
+        #else:
+        #    print("="*50)
 
-            # test that the model weights can be reloaded
-            # concatenating the weights learned into a single model
-            
-            good_models_state_dict = dict()
-            cat_dim = 1 if config['model.arch'] in ["mlp", "linear"] else 0
-            for k in perfect_model_weights[0].keys():
-                good_models_state_dict[k] = torch.cat(
-                    [d[k].cpu() for d in perfect_model_weights], dim=cat_dim
-                )
+        #    # test that the model weights can be reloaded
+        #    # concatenating the weights learned into a single model
+        #    
+        #    good_models_state_dict = dict()
+        #    cat_dim = 1 if config['model.arch'] in ["mlp", "linear"] else 0
+        #    for k in perfect_model_weights[0].keys():
+        #        good_models_state_dict[k] = torch.cat(
+        #            [d[k].cpu() for d in perfect_model_weights], dim=cat_dim
+        #        )
 
-            if config['model.arch'] == "mlp":
-                kwargs = {"input_dim": 2,
-                        "output_dim": 2,
-                        "layers": config['model.mlp.layers'],
-                        "hidden_units": config['model.mlp.hidden_units'],
-                        "model_count": target_model_count_subrun}
-                new_models = MLPModels(**kwargs, device=torch.device('cpu'))
+        #    if config['model.arch'] == "mlp":
+        #        kwargs = {"input_dim": 2,
+        #                "output_dim": 2,
+        #                "layers": config['model.mlp.layers'],
+        #                "hidden_units": config['model.mlp.hidden_units'],
+        #                "model_count": target_model_count_subrun}
+        #        new_models = MLPModels(**kwargs, device=torch.device('cpu'))
 
-            elif config['model.arch'] == "linear":
-                kwargs = {"input_dim": model.input_dim,
-                        "output_dim": model.output_dim,
-                        "model_count": target_model_count_subrun}
-                new_models = LinearModels(**kwargs, device=torch.device('cpu'))
+        #    elif config['model.arch'] == "linear":
+        #        kwargs = {"input_dim": model.input_dim,
+        #                "output_dim": model.output_dim,
+        #                "model_count": target_model_count_subrun}
+        #        new_models = LinearModels(**kwargs, device=torch.device('cpu'))
 
-            elif  config['model.arch'] == "lenet":
-                kwargs = {"output_dim": config['dataset.mnistcifar.num_classes'],
-                        "width_factor": config['model.lenet.width'],
-                        "model_count": target_model_count_subrun,
-                        "dataset": config['dataset.name'],
-                        "feature_dim": config['model.lenet.feature_dim']}
-                new_models = LeNetModels(**kwargs)
+        #    elif  config['model.arch'] == "lenet":
+        #        kwargs = {"output_dim": config['dataset.mnistcifar.num_classes'],
+        #                "width_factor": config['model.lenet.width'],
+        #                "model_count": target_model_count_subrun,
+        #                "dataset": config['dataset.name'],
+        #                "feature_dim": config['model.lenet.feature_dim']}
+        #        new_models = LeNetModels(**kwargs)
 
-            new_models.load_state_dict(good_models_state_dict)
-            # show norm of the model
-            model_l2_norm = 0
-            model_linf_norm = 0
-            for para in new_models.parameters():
-                model_l2_norm += (para**2).sum()
-                model_linf_norm = max(para.abs().max(), model_linf_norm)
-            model_l2_norm = model_l2_norm ** 0.5
-            print(f"model l2 norm: {model_l2_norm}")
-            print(f"model linf norm: {model_linf_norm}")
+        #    new_models.load_state_dict(good_models_state_dict)
+        #    # show norm of the model
+        #    model_l2_norm = 0
+        #    model_linf_norm = 0
+        #    for para in new_models.parameters():
+        #        model_l2_norm += (para**2).sum()
+        #        model_linf_norm = max(para.abs().max(), model_linf_norm)
+        #    model_l2_norm = model_l2_norm ** 0.5
+        #    print(f"model l2 norm: {model_l2_norm}")
+        #    print(f"model linf norm: {model_linf_norm}")
 
-            with torch.no_grad():
-                loss, acc = calculate_loss_acc(train_data.cpu(), train_labels.cpu(), new_models, loss_func, batch_size=1)
-                test_loss, test_acc = calculate_loss_acc(test_all_data.cpu(), test_all_labels.cpu(), new_models, loss_func, batch_size=1)
-                # Calculate exact match for length generalization
-                em_test = calculate_exact_match_accuracy(test_all_labels.cpu(), test_all_data.cpu(), new_models, loss_func, batch_size=1)
-                print(f"verify that train acc is 100%: {acc.mean().item()}")
-                print(f"test acc: {test_acc.mean().item(): 0.3f} ({test_acc.max().item(): 0.3f} , {test_acc.min().item(): 0.3f} )")
-                print(f"exact match test: {em_test.mean().item(): 0.3f} ({em_test.max().item(): 0.3f} , {em_test.min().item(): 0.3f} )")
+        with torch.no_grad():
+            loss, acc = calculate_loss_acc(train_data, train_labels, model, loss_func, batch_size=1)
+            test_loss, test_acc = calculate_loss_acc(test_all_data, test_all_labels, model, loss_func, batch_size=1)
+            # Calculate exact match for length generalization
+            em_test = calculate_transformer_exactmatch(test_all_data, test_all_labels, model, loss_func, batch_size=1)
+            print(f"verify that train acc is 100%: {acc.mean().item()}")
+            print(f"test acc: {test_acc.mean().item(): 0.3f} ({test_acc.max().item(): 0.3f} , {test_acc.min().item(): 0.3f} )")
+            print(f"exact match test: {em_test.mean().item(): 0.3f} ({em_test.max().item(): 0.3f} , {em_test.min().item(): 0.3f} )")
 
-            # saving the models
-            os.makedirs(os.path.join(config['output.folder'], "models"), exist_ok=True)
-            output_path = build_model_output_path(config, training_seed, data_seed, cur_num_samples)
-            print(f"Saving models at: {output_path}")
-            # run specific features that are saved only for evaluate_minimas.py,these are used for resumming models
-            saveconfig = convert_config_to_dict(config)
-            saveconfig['dataset.num_samples'] = cur_num_samples
-            saveconfig['training.seed'] = training_seed
-            saveconfig['dataset.seed'] = data_seed
-            saveconfig['training.es_l'], saveconfig['training.es_u'] = cur_loss_bin
+        # saving the models
+        os.makedirs(os.path.join(config['output.folder'], "models"), exist_ok=True)
+        output_path = build_model_output_path(config, training_seed, data_seed, cur_num_samples)
+        print(f"Saving models at: {output_path}")
+        # run specific features that are saved only for evaluate_minimas.py,these are used for resumming models
+        saveconfig = convert_config_to_dict(config)
+        saveconfig['dataset.num_samples'] = cur_num_samples
+        saveconfig['training.seed'] = training_seed
+        saveconfig['dataset.seed'] = data_seed
+        saveconfig['training.es_l'], saveconfig['training.es_u'] = cur_loss_bin
 
-            # save the model
-            torch.save({"kwargs": kwargs,
-                        "good_models_state_dict": good_models_state_dict,
-                        "config": saveconfig},
-                    output_path)
+        # save the model
+        #torch.save({"kwargs": kwargs,
+        #            "good_models_state_dict": good_models_state_dict,
+        #            "config": saveconfig},
+        #        output_path)
 
 
-            update_model_stats_table(
-                db_path, 
-                model_id=model_id, data_seed=data_seed, 
-                training_seed=training_seed, 
-                num_training_samples=cur_num_samples, 
-                loss_bin_l=es_l, 
-                loss_bin_u=es_u, 
-                test_acc=test_acc.mean().item(), 
-                train_time=train_time,  
-                perfect_model_count=target_model_count_subrun, 
-                tested_model_count=tested_model_count, 
-                save_path=output_path, status="COMPLETE")
+        update_model_stats_table(
+            db_path, 
+            model_id=model_id, data_seed=data_seed, 
+            training_seed=training_seed, 
+            num_training_samples=cur_num_samples, 
+            loss_bin_l=es_l, 
+            loss_bin_u=es_u, 
+            test_acc=test_acc.mean().item(), 
+            train_time=train_time,  
+            perfect_model_count=target_model_count_subrun, 
+            tested_model_count=tested_model_count, 
+            save_path=output_path, status="COMPLETE")
         
 

@@ -67,6 +67,43 @@ def calculate_transformer_loss_acc(data, labels, model, loss_func, batch_size=No
         return loss, acc
 
 
+def calculate_transformer_exactmatch(data, labels, model, loss_func, batch_size=None):
+
+    """
+    Calculate loss and accuracy for transformer models on counting task.
+    For counting task, 'data' contains the full sequences and 'labels' is ignored.
+    """
+    if batch_size is None:
+        # For next-token prediction: input = seq[:-1], target = seq[1:]
+        x = data[:, :-1]  # All tokens except last
+        y = data[:, 1:]   # All tokens except first (shifted by 1)
+        
+        logits = model(x)  # (batch_size, model_count, seq_len, vocab_size)
+        
+        # Calculate token-wise accuracy on answer portion only
+        acc = calculate_exact_match_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+        
+        return acc
+    else:
+        # Batched processing
+        all_accs = []
+        
+        for i in range(0, len(data), batch_size):
+            batch_data = data[i:min(i+batch_size, len(data))]
+            
+            x = batch_data[:, :-1]
+            y = batch_data[:, 1:]
+            
+            logits = model(x)
+            acc = calculate_exact_match_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+            
+            all_accs.append(acc)
+        
+        # Average across batches
+        acc = torch.stack(all_accs).mean(dim=0)
+        
+        return acc
+
 def calculate_counting_accuracy(target, logits, sep_token_id, pad_token_id):
     """
     Calculate token-wise accuracy only on the counting part (after separator).
@@ -835,6 +872,9 @@ class TransformerModels(nn.Module):
             DecoderOnlyTransformer(vocab_size, d_model, n_layers, n_heads, d_ff, max_len, dropout)
             for _ in range(model_count)
         ])
+        self.basis_list = None
+        self.curr_idx = 0
+        self.radius = 0.1
 
     def forward(self, x, position_ids=None):
         # x shape: (batch_size, seq_len)
@@ -958,42 +998,97 @@ class TransformerModels(nn.Module):
         return self.loss_function(y, logits)
 
     @torch.no_grad()
-    def pattern_search(self, x, y, loss_func):
-        """Pattern search optimization method following existing pattern."""
-        # Use the first transformer as the base and modify others
-        base_params = list(self.transformers[0].parameters())
+    def get_flattened_parameters(self):
+        """
+        Concatenate all parameters from each transformer model into a single tensor.
+        Returns: torch.Tensor of shape (model_count, total_params_per_model)
+        """
+        flattened_models = []
         
-        # Simple pattern search: try small perturbations
-        best_loss = float('inf')
-        best_model_idx = 0
+        for transformer in self.transformers:
+            # Get all parameters for this transformer and flatten them
+            params = []
+            for param in transformer.parameters():
+                params.append(param.data.flatten())
+            
+            # Concatenate all parameters for this model
+            model_params = torch.cat(params)
+            flattened_models.append(model_params)
         
-        # Calculate initial loss
-        logits = self(x)
-        current_losses = self.loss_function(y, logits)
-        base_loss = current_losses[0].item()
+        # Stack all models to get (model_count, total_params)
+        return torch.stack(flattened_models)
+
+    @torch.no_grad()
+    def set_flattened_parameters(self, flattened_params):
+        """
+        Set parameters from a flattened tensor back to the transformer models.
+        Args: flattened_params of shape (model_count, total_params_per_model)
+        """
+        for model_idx, transformer in enumerate(self.transformers):
+            param_idx = 0
+            for param in transformer.parameters():
+                param_size = param.numel()
+                param.data.copy_(
+                    flattened_params[model_idx, param_idx:param_idx + param_size].view(param.shape)
+                )
+                param_idx += param_size
+
+    @torch.no_grad()
+    def pattern_search(self, data, dummy_labels, loss_func):
+        x = data[:,:-1]
+        y = data[:,1:]
+        import random
         
-        # Try perturbations on other models
-        for model_idx in range(1, self.model_count):
-            with torch.no_grad():
-                # Reset model to base
-                for target_param, base_param in zip(self.transformers[model_idx].parameters(), base_params):
-                    target_param.copy_(base_param)
-                
-                # Add small random perturbations
-                for param in self.transformers[model_idx].parameters():
-                    param.add_(torch.randn_like(param) * 0.01)
+        if self.basis_list is None:
+            flattened_params = self.get_flattened_parameters()
+            self.basis_list = []
+            
+            for p in range(flattened_params.shape[1]):
+                self.basis_list.append((p, "+"))
+                self.basis_list.append((p, "-"))
         
-        # Evaluate all models
-        logits = self(x)
-        losses = self.loss_function(y, logits)
-        
-        # Find best model
-        best_idx = losses.argmin().item()
-        
-        # Copy best model to position 0
-        if best_idx != 0:
-            for target_param, best_param in zip(self.transformers[0].parameters(), self.transformers[best_idx].parameters()):
-                target_param.copy_(best_param)
+        random.shuffle(self.basis_list)
+        self.curr_idx = 0
+
+        while True:
+            # Get current flattened parameters
+            flattened_params = self.get_flattened_parameters()
+            
+            # replicate the first model across all models
+            flattened_params[1:] = flattened_params[0:1]
+
+            # modify each model at one parameter location
+            for i in range(1, self.model_count):
+                if self.curr_idx >= len(self.basis_list):
+                    print("went over everything")
+                    random.shuffle(self.basis_list)
+                    self.radius /= 2
+                    self.curr_idx = 0
+                    break
+
+                p_i, op = self.basis_list[self.curr_idx]
+                if op == "+":
+                    flattened_params[i, p_i] += self.radius
+                else:
+                    flattened_params[i, p_i] -= self.radius
+                self.curr_idx += 1
+
+            # Set the modified parameters back
+            self.set_flattened_parameters(flattened_params)
+
+            # forward and select the model with the best loss
+            pred = self.forward(x)
+            loss = self.loss_function(y, pred)
+            best_idx = loss.min(dim=0).indices
+
+            # ALWAYS copy best model to position 0
+            flattened_params = self.get_flattened_parameters()
+            flattened_params[:] = flattened_params[best_idx:best_idx+1]
+            self.set_flattened_parameters(flattened_params)
+            
+            # Break if no improvement (best model is still the original at index 0)
+            if best_idx == 0:
+                break
 
     @torch.no_grad()
     def reset_parameters(self):
@@ -1023,7 +1118,11 @@ class TransformerModels(nn.Module):
     def get_weights_by_idx(self, idx):
         """Get weights for specific model indices."""
         if isinstance(idx, torch.Tensor):
-            idx = idx.cpu().numpy()
+            if idx.dtype == torch.bool:
+                # Convert boolean tensor to integer indices
+                idx = idx.nonzero(as_tuple=True)[0].cpu().numpy()
+            else:
+                idx = idx.cpu().numpy()
         elif isinstance(idx, int):
             idx = [idx]
         

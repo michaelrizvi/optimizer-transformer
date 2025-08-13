@@ -494,7 +494,7 @@ class CountSequenceDataset(Dataset):
     
     def __init__(
         self,
-        n_samples: int,
+        n_samples: int = 5000,
         min_range_size: int = 1,  # Minimum size of counting range (max - min)
         max_range_size: int = 10, # Maximum size of counting range (max - min)
         vocab_size: int = 20,
