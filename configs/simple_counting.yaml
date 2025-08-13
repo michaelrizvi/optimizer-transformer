@@ -1,0 +1,39 @@
+dataset:
+  name: counting
+  counting:
+    min_range_size: 1
+    max_range_size: 3
+    vocab_size: 50
+    sep_token: 102
+    pad_token: 103
+
+model:
+  arch: transformer
+  transformer:
+    d_model: 32
+    n_layers: 2
+    n_heads: 4
+    d_ff: 64
+    max_len: 32
+    dropout: 0.1
+  model_count_times_batch_size: 500  # Will create 5 models with batch_size 100
+  init: regular
+
+optimizer:
+  name: SGD
+  lr: 0.01
+  momentum: 0.9
+  epochs: 100
+  batch_size: 100
+  scheduler: true
+
+training:
+  test_acc_threshold: 0.9
+  max_epochs: 200
+  save_frequency: 5
+  device: cpu  # Change to cuda if available
+  seed: 42
+
+output:
+  results_file: results/simple_counting_results.json
+  log_file: results/simple_counting.log
