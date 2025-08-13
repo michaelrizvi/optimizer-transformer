@@ -1010,15 +1010,14 @@ class TransformerModels(nn.Module):
         if self.basis_list is None:
             self.basis_list = []
             
-            # Iterate over each transformer and its parameters
-            for transformer_idx in range(self.model_count):
-                transformer = self.transformers[transformer_idx]
-                for param_name, param in transformer.named_parameters():
-                    param_flat = param.data.view(-1)
-                    for param_idx in range(param_flat.shape[0]):
-                        # Each basis element: (transformer_idx, param_name, param_tensor, param_flat_idx, direction)
-                        self.basis_list.append((transformer_idx, param_name, param, param_idx, "+"))
-                        self.basis_list.append((transformer_idx, param_name, param, param_idx, "-"))
+            # Only iterate over transformer[0] parameters since we copy it to all others anyway
+            transformer_0 = self.transformers[0]
+            for param_name, param in transformer_0.named_parameters():
+                param_flat = param.data.view(-1)
+                for param_idx in range(param_flat.shape[0]):
+                    # Each basis element: (param_name, param_flat_idx, direction)
+                    self.basis_list.append((param_name, param_idx, "+"))
+                    self.basis_list.append((param_name, param_idx, "-"))
         
         random.shuffle(self.basis_list)
         self.curr_idx = 0
@@ -1038,11 +1037,10 @@ class TransformerModels(nn.Module):
                 if self.curr_idx >= len(self.basis_list):
                     break
                 
-                transformer_idx, param_name, param_tensor, param_idx, direction = self.basis_list[self.curr_idx]
+                param_name, param_idx, direction = self.basis_list[self.curr_idx]
                 
-                # Apply perturbation to transformer i, using the basis element's parameter
-                target_transformer = self.transformers[i]
-                target_param = dict(target_transformer.named_parameters())[param_name]
+                # Apply perturbation to transformer i at the specified parameter location
+                target_param = dict(self.transformers[i].named_parameters())[param_name]
                 target_param_flat = target_param.data.view(-1)
                 
                 if direction == "+":
