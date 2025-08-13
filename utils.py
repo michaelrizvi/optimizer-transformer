@@ -848,316 +848,323 @@ class LinearModels(nn.Module):
         return new_model
 
 
-class TransformerModels(nn.Module):
-    def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.d_model = d_model
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.d_ff = d_ff
-        self.max_len = max_len
-        self.model_count = model_count
-        self.device = device
-        self.dropout = dropout
-        self.sep_token_id = sep_token_id
-        self.pad_token_id = pad_token_id
+#class TransformerModels(nn.Module):
+    #def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103):
+        #super().__init__()
+        #self.vocab_size = vocab_size
+        #self.d_model = d_model
+        #self.n_layers = n_layers
+        #self.n_heads = n_heads
+        #self.d_ff = d_ff
+        #self.max_len = max_len
+        #self.model_count = model_count
+        #self.device = device
+        #self.dropout = dropout
+        #self.sep_token_id = sep_token_id
+        #self.pad_token_id = pad_token_id
         
-        # Create multiple transformer models using grouped convolutions pattern
-        self.token_emb = nn.Embedding(vocab_size * model_count, d_model)
-        self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
+        ## Create multiple transformer models using grouped convolutions pattern
+        #self.token_emb = nn.Embedding(vocab_size * model_count, d_model)
+        #self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
         
-        # Create transformer blocks - we'll use multiple separate transformers
-        self.transformers = nn.ModuleList([
-            DecoderOnlyTransformer(vocab_size, d_model, n_layers, n_heads, d_ff, max_len, dropout)
-            for _ in range(model_count)
-        ])
-        self.basis_list = None
-        self.curr_idx = 0
-        self.radius = 0.1
+        ## Create transformer blocks - we'll use multiple separate transformers
+        #self.transformers = nn.ModuleList([
+            #DecoderOnlyTransformer(vocab_size, d_model, n_layers, n_heads, d_ff, max_len, dropout)
+            #for _ in range(model_count)
+        #])
+        #self.basis_list = None
+        #self.curr_idx = 0
+        #self.radius = 0.1
 
-    def forward(self, x, position_ids=None):
-        # x shape: (batch_size, seq_len)
-        # Output shape: (batch_size, model_count, seq_len, vocab_size)
-        batch_size, seq_len = x.size()
+    #def forward(self, x, position_ids=None):
+        ## x shape: (batch_size, seq_len)
+        ## Output shape: (batch_size, model_count, seq_len, vocab_size)
+        #batch_size, seq_len = x.size()
         
-        outputs = []
-        for i, transformer in enumerate(self.transformers):
-            out = transformer(x, position_ids)  # (batch_size, seq_len, vocab_size)
-            outputs.append(out.unsqueeze(1))  # (batch_size, 1, seq_len, vocab_size)
+        #outputs = []
+        #for i, transformer in enumerate(self.transformers):
+            #out = transformer(x, position_ids)  # (batch_size, seq_len, vocab_size)
+            #outputs.append(out.unsqueeze(1))  # (batch_size, 1, seq_len, vocab_size)
         
-        # Stack along model dimension
-        outputs = torch.cat(outputs, dim=1)  # (batch_size, model_count, seq_len, vocab_size)
-        return outputs
+        ## Stack along model dimension
+        #outputs = torch.cat(outputs, dim=1)  # (batch_size, model_count, seq_len, vocab_size)
+        #return outputs
 
-    def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
-        """Cross entropy loss ignoring pad tokens."""
-        # Reshape if needed: (B, M, S, V) -> (B*M*S, V)
-        if logits.dim() > 2:
-            logits = logits.reshape(-1, logits.size(-1))
+    #def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        #"""Cross entropy loss ignoring pad tokens."""
+        ## Reshape if needed: (B, M, S, V) -> (B*M*S, V)
+        #if logits.dim() > 2:
+            #logits = logits.reshape(-1, logits.size(-1))
         
-        # Reshape target: (B, S) -> (B*S) and repeat for all models
-        if target.dim() == 2:
-            batch_size, seq_len = target.size()
-            target = target.unsqueeze(1).expand(-1, self.model_count, -1).reshape(-1)
-        elif target.dim() == 1:
-            target = target.repeat(self.model_count)
+        ## Reshape target: (B, S) -> (B*S) and repeat for all models
+        #if target.dim() == 2:
+            #batch_size, seq_len = target.size()
+            #target = target.unsqueeze(1).expand(-1, self.model_count, -1).reshape(-1)
+        #elif target.dim() == 1:
+            #target = target.repeat(self.model_count)
             
-        # Ignore pad tokens for loss calculation
-        mask = target != self.pad_token_id
-        filtered_logits = logits[mask]
-        filtered_target = target[mask]
+        ## Ignore pad tokens for loss calculation
+        #mask = target != self.pad_token_id
+        #filtered_logits = logits[mask]
+        #filtered_target = target[mask]
         
-        loss = torch.nn.functional.cross_entropy(filtered_logits, filtered_target, reduction='none')
+        #loss = torch.nn.functional.cross_entropy(filtered_logits, filtered_target, reduction='none')
         
-        # Reshape loss back to (batch_size * model_count,) then (batch_size, model_count)
-        # This is tricky - we need to figure out how many valid tokens per sequence
-        valid_tokens_per_seq = mask.view(-1, self.model_count).sum(dim=0)  # tokens per model
+        ## Reshape loss back to (batch_size * model_count,) then (batch_size, model_count)
+        ## This is tricky - we need to figure out how many valid tokens per sequence
+        #valid_tokens_per_seq = mask.view(-1, self.model_count).sum(dim=0)  # tokens per model
         
-        # For simplicity, let's compute loss per model
-        losses = []
-        mask_reshaped = mask.view(-1, self.model_count)  # (total_tokens, model_count)
-        loss_idx = 0
+        ## For simplicity, let's compute loss per model
+        #losses = []
+        #mask_reshaped = mask.view(-1, self.model_count)  # (total_tokens, model_count)
+        #loss_idx = 0
         
-        for model_idx in range(self.model_count):
-            model_mask = mask_reshaped[:, model_idx]
-            model_valid_count = model_mask.sum().item()
-            if model_valid_count > 0:
-                model_loss = loss[loss_idx:loss_idx + model_valid_count].mean()
-                losses.append(model_loss)
-                loss_idx += model_valid_count
-            else:
-                losses.append(torch.tensor(0.0, device=loss.device))
+        #for model_idx in range(self.model_count):
+            #model_mask = mask_reshaped[:, model_idx]
+            #model_valid_count = model_mask.sum().item()
+            #if model_valid_count > 0:
+                #model_loss = loss[loss_idx:loss_idx + model_valid_count].mean()
+                #losses.append(model_loss)
+                #loss_idx += model_valid_count
+            #else:
+                #losses.append(torch.tensor(0.0, device=loss.device))
         
-        return torch.stack(losses)
+        #return torch.stack(losses)
 
-    def calculate_exact_match(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
-        """Calculate exact match - 1 if answer portion after separator is correct, 0 otherwise."""
-        # Get predicted tokens - always argmax on last dimension
-        preds = logits.argmax(dim=-1)  # (batch_size, model_count, seq_len)
+    #def calculate_exact_match(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        #"""Calculate exact match - 1 if answer portion after separator is correct, 0 otherwise."""
+        ## Get predicted tokens - always argmax on last dimension
+        #preds = logits.argmax(dim=-1)  # (batch_size, model_count, seq_len)
         
-        batch_size = target.size(0)
-        model_exact_matches = []
+        #batch_size = target.size(0)
+        #model_exact_matches = []
         
-        for model_idx in range(self.model_count):
-            exact_matches = []
-            model_preds = preds[:, model_idx, :]  # (batch_size, seq_len)
+        #for model_idx in range(self.model_count):
+            #exact_matches = []
+            #model_preds = preds[:, model_idx, :]  # (batch_size, seq_len)
             
-            for batch_idx in range(batch_size):
-                # Find separator token position in target sequence
-                sep_positions = (target[batch_idx] == self.sep_token_id).nonzero(as_tuple=True)[0]
+            #for batch_idx in range(batch_size):
+                ## Find separator token position in target sequence
+                #sep_positions = (target[batch_idx] == self.sep_token_id).nonzero(as_tuple=True)[0]
                 
-                if len(sep_positions) == 0:
-                    # No separator found, fall back to full sequence match
-                    mask = target[batch_idx] != self.pad_token_id
-                    correct_per_token = (model_preds[batch_idx] == target[batch_idx]) | ~mask
-                    exact_matches.append(correct_per_token.all().float())
-                else:
-                    # Get position after separator - this is where the answer starts
-                    sep_pos = sep_positions[0].item()
-                    answer_start = sep_pos + 1
+                #if len(sep_positions) == 0:
+                    ## No separator found, fall back to full sequence match
+                    #mask = target[batch_idx] != self.pad_token_id
+                    #correct_per_token = (model_preds[batch_idx] == target[batch_idx]) | ~mask
+                    #exact_matches.append(correct_per_token.all().float())
+                #else:
+                    ## Get position after separator - this is where the answer starts
+                    #sep_pos = sep_positions[0].item()
+                    #answer_start = sep_pos + 1
                     
-                    # Only check tokens after separator (ignoring pad tokens)
-                    answer_target = target[batch_idx, answer_start:]
-                    answer_pred = model_preds[batch_idx, answer_start:]
+                    ## Only check tokens after separator (ignoring pad tokens)
+                    #answer_target = target[batch_idx, answer_start:]
+                    #answer_pred = model_preds[batch_idx, answer_start:]
                     
-                    # Create mask for non-pad tokens in answer portion
-                    answer_mask = answer_target != self.pad_token_id
+                    ## Create mask for non-pad tokens in answer portion
+                    #answer_mask = answer_target != self.pad_token_id
                     
-                    if answer_mask.sum() == 0:
-                        # No answer tokens to check
-                        exact_matches.append(torch.tensor(1.0))
-                    else:
-                        # Check if all non-pad answer tokens match
-                        correct_answer_tokens = (answer_pred == answer_target) | ~answer_mask
-                        exact_matches.append(correct_answer_tokens.all().float())
+                    #if answer_mask.sum() == 0:
+                        ## No answer tokens to check
+                        #exact_matches.append(torch.tensor(1.0))
+                    #else:
+                        ## Check if all non-pad answer tokens match
+                        #correct_answer_tokens = (answer_pred == answer_target) | ~answer_mask
+                        #exact_matches.append(correct_answer_tokens.all().float())
             
-            model_exact_matches.append(torch.stack(exact_matches).mean())
+            #model_exact_matches.append(torch.stack(exact_matches).mean())
         
-        return torch.stack(model_exact_matches)
+        #return torch.stack(model_exact_matches)
 
-    def compute_loss(self, batch):
-        """Compute loss for a batch - used by both training and validation."""
-        # Handle both old tensor format and new dict format with position_ids
-        if isinstance(batch, dict):
-            sequences = batch['input_ids']
-            position_ids = batch.get('position_ids', None)
-        else:
-            # Legacy tensor format
-            sequences = batch
-            position_ids = None
+    #def compute_loss(self, batch):
+        #"""Compute loss for a batch - used by both training and validation."""
+        ## Handle both old tensor format and new dict format with position_ids
+        #if isinstance(batch, dict):
+            #sequences = batch['input_ids']
+            #position_ids = batch.get('position_ids', None)
+        #else:
+            ## Legacy tensor format
+            #sequences = batch
+            #position_ids = None
             
-        # For next-token prediction: input = seq[:-1], target = seq[1:]
-        x = sequences[:, :-1]  # All tokens except last
-        y = sequences[:, 1:]   # All tokens except first (shifted by 1)
+        ## For next-token prediction: input = seq[:-1], target = seq[1:]
+        #x = sequences[:, :-1]  # All tokens except last
+        #y = sequences[:, 1:]   # All tokens except first (shifted by 1)
         
-        # Adjust position_ids for shifted input if present
-        pos_ids = position_ids[:, :-1] if position_ids is not None else None
+        ## Adjust position_ids for shifted input if present
+        #pos_ids = position_ids[:, :-1] if position_ids is not None else None
         
-        logits = self(x, position_ids=pos_ids)
-        return self.loss_function(y, logits)
+        #logits = self(x, position_ids=pos_ids)
+        #return self.loss_function(y, logits)
 
-    @torch.no_grad()
-    def get_flattened_parameters(self):
-        """
-        Concatenate all parameters from each transformer model into a single tensor.
-        Returns: torch.Tensor of shape (model_count, total_params_per_model)
-        """
-        flattened_models = []
+    #@torch.no_grad()
+    #def pattern_search(self, data, dummy_labels, loss_func):
+        #x = data[:,:-1]
+        #y = data[:,1:]
+        #if self.basis_list is None:
+            #self.basis_list = []
+            #for para in self.parameters():
+                #print(para.shape)
+                #original_shape = para.shape
+                ### Handle different parameter shapes correctly
+                ##if len(original_shape) >= 2:
+                    ### 2D+ parameters: reshape to (model_count, -1)
+                    ##para_flatten = para.data.view(self.model_count, -1)
+                ##elif len(original_shape) == 1 and original_shape[0] % self.model_count == 0:
+                    ### 1D parameters that are model-specific: reshape to (model_count, -1)
+                    ##para_flatten = para.data.view(self.model_count, -1)
+                    
+                ##for p in range(para_flatten.shape[1]):
+                    ##self.basis_list.append((para_flatten, p, "+"))
+                    ##self.basis_list.append((para_flatten, p, "-"))
+            #import sys
+            #sys.exit(0)
         
-        for transformer in self.transformers:
-            # Get all parameters for this transformer and flatten them
-            params = []
-            for param in transformer.parameters():
-                params.append(param.data.flatten())
+        #random.shuffle(self.basis_list)
+        #self.curr_idx = 0
+        #max_attempts = min(len(self.basis_list), self.model_count - 1)
+
+        #while True:
+            ## Replicate the first model across all model copies
+            #for para in self.parameters():
+                #original_shape = para.shape
+                #if len(original_shape) >= 2:
+                    ## 2D+ parameters: reshape correctly
+                    #para_reshaped = para.data.view(self.model_count, -1)
+                    #para_reshaped[1:] = para_reshaped[0:1]
+                #elif len(original_shape) == 1 and original_shape[0] % self.model_count == 0:
+                    ## 1D parameters that are model-specific
+                    #para_reshaped = para.data.view(self.model_count, -1)
+                    #para_reshaped[1:] = para_reshaped[0:1]
+
+            ## Modify each model at one parameter location
+            #improvements_found = 0
+            #for i in range(1, min(self.model_count, max_attempts + 1)):
+                #if self.curr_idx >= len(self.basis_list):
+                    #break
+                    
+                #para_flatten, p_i, op = self.basis_list[self.curr_idx]
+                
+                #if op == "+":
+                    #para_flatten[i, p_i] += self.radius
+                #else:
+                    #para_flatten[i, p_i] -= self.radius
+                #self.curr_idx += 1
+                #if self.curr_idx >= len(self.basis_list):
+                    #print("went over everything")
+                    #random.shuffle(self.basis_list)
+                    #self.radius /= 2
+                    #self.curr_idx = 0
+                    #break 
+
+            ## Forward pass and select best model
+            #pred = self.forward(x)  # (batch_size, model_count, seq_len, vocab_size)
+            #loss = self.loss_function(pred, y)
+            #best_idx = loss.min(dim=0).indices
+            #best_loss = loss[best_idx]
+
+            ## Copy best model to position 0, but only if it's better
+            #current_loss = loss[0]
+            #if best_loss < current_loss:
+                #for para in self.parameters():
+                    #original_shape = para.shape
+                    #if len(original_shape) >= 2:
+                        #para_reshaped = para.data.view(self.model_count, -1)
+                        #para_reshaped[0] = para_reshaped[best_idx]
+                    #elif len(original_shape) == 1 and original_shape[0] % self.model_count == 0:
+                        #para_reshaped = para.data.view(self.model_count, -1)
+                        #para_reshaped[0] = para_reshaped[best_idx]
+                #improvements_found += 1
+                
+            ## Check termination conditions
+            #if self.curr_idx >= len(self.basis_list):
+                #if improvements_found == 0:
+                    ## No improvements found in full sweep, reduce radius
+                    #self.radius *= 0.5
+                    #print(f"Pattern search: radius reduced to {self.radius:.6f}")
+                    #if self.radius < 1e-8:
+                        #print("Pattern search: radius too small, stopping")
+                        #break
+                #else:
+                    ## Some improvements found, continue with current radius
+                    #print(f"Pattern search: found {improvements_found} improvements")
+                
+                #random.shuffle(self.basis_list)
+                #self.curr_idx = 0
+                #max_attempts = min(len(self.basis_list), self.model_count - 1)
+                
+            ## Stop if we made a significant improvement
+            #if best_idx != 0 and improvements_found > 0:
+                #break
+
+    #@torch.no_grad()
+    #def reset_parameters(self):
+        #"""Reset all model parameters."""
+        #for transformer in self.transformers:
+            #def reset_module(m):
+                #if hasattr(m, 'reset_parameters'):
+                    #m.reset_parameters()
+                #elif hasattr(m, 'weight'):
+                    #nn.init.xavier_uniform_(m.weight)
+                    #if hasattr(m, 'bias') and m.bias is not None:
+                        #nn.init.constant_(m.bias, 0)
+            #transformer.apply(reset_module)
+
+    #@torch.no_grad()
+    #def reinitialize(self, mult=1):
+        #"""Reinitialize all model parameters with uniform distribution."""
+        #for transformer in self.transformers:
+            #for param in transformer.parameters():
+                #nn.init.uniform_(param, -mult, mult)
+
+    #def forward_normalize(self, x):
+        #"""Forward pass with normalization - for compatibility with existing code."""
+        #return self.forward(x)
+
+    #@torch.no_grad()
+    #def get_weights_by_idx(self, idx):
+        #"""Get weights for specific model indices."""
+        #if isinstance(idx, torch.Tensor):
+            #if idx.dtype == torch.bool:
+                ## Convert boolean tensor to integer indices
+                #idx = idx.nonzero(as_tuple=True)[0].cpu().numpy()
+            #else:
+                #idx = idx.cpu().numpy()
+        #elif isinstance(idx, int):
+            #idx = [idx]
+        
+        #state_dicts = []
+        #for i in idx:
+            #state_dicts.append({k: v.clone().cpu() for k, v in self.transformers[i].state_dict().items()})
+        #return state_dicts
+
+    #def get_model_subsets(self, idx):
+        #"""Create a new TransformerModels with subset of models."""
+        #if isinstance(idx, torch.Tensor):
+            #idx = idx.tolist()
+        #elif isinstance(idx, int):
+            #idx = [idx]
             
-            # Concatenate all parameters for this model
-            model_params = torch.cat(params)
-            flattened_models.append(model_params)
+        #new_model_count = len(idx)
+        #new_model = TransformerModels(
+            #vocab_size=self.vocab_size,
+            #d_model=self.d_model,
+            #n_layers=self.n_layers,
+            #n_heads=self.n_heads,
+            #d_ff=self.d_ff,
+            #max_len=self.max_len,
+            #model_count=new_model_count,
+            #device=self.device,
+            #dropout=self.dropout,
+            #sep_token_id=self.sep_token_id,
+            #pad_token_id=self.pad_token_id
+        #)
         
-        # Stack all models to get (model_count, total_params)
-        return torch.stack(flattened_models)
-
-    @torch.no_grad()
-    def set_flattened_parameters(self, flattened_params):
-        """
-        Set parameters from a flattened tensor back to the transformer models.
-        Args: flattened_params of shape (model_count, total_params_per_model)
-        """
-        for model_idx, transformer in enumerate(self.transformers):
-            param_idx = 0
-            for param in transformer.parameters():
-                param_size = param.numel()
-                param.data.copy_(
-                    flattened_params[model_idx, param_idx:param_idx + param_size].view(param.shape)
-                )
-                param_idx += param_size
-
-    @torch.no_grad()
-    def pattern_search(self, data, dummy_labels, loss_func):
-        x = data[:,:-1]
-        y = data[:,1:]
-        import random
+        ## Copy the selected transformers
+        #for new_idx, old_idx in enumerate(idx):
+            #new_model.transformers[new_idx].load_state_dict(self.transformers[old_idx].state_dict())
         
-        if self.basis_list is None:
-            flattened_params = self.get_flattened_parameters()
-            self.basis_list = []
-            
-            for p in range(flattened_params.shape[1]):
-                self.basis_list.append((p, "+"))
-                self.basis_list.append((p, "-"))
-        
-        random.shuffle(self.basis_list)
-        self.curr_idx = 0
-
-        while True:
-            # Get current flattened parameters
-            flattened_params = self.get_flattened_parameters()
-            
-            # replicate the first model across all models
-            flattened_params[1:] = flattened_params[0:1]
-
-            # modify each model at one parameter location
-            for i in range(1, self.model_count):
-                if self.curr_idx >= len(self.basis_list):
-                    print("went over everything")
-                    random.shuffle(self.basis_list)
-                    self.radius /= 2
-                    self.curr_idx = 0
-                    break
-
-                p_i, op = self.basis_list[self.curr_idx]
-                if op == "+":
-                    flattened_params[i, p_i] += self.radius
-                else:
-                    flattened_params[i, p_i] -= self.radius
-                self.curr_idx += 1
-
-            # Set the modified parameters back
-            self.set_flattened_parameters(flattened_params)
-
-            # forward and select the model with the best loss
-            pred = self.forward(x)
-            loss = self.loss_function(y, pred)
-            best_idx = loss.min(dim=0).indices
-
-            # ALWAYS copy best model to position 0
-            flattened_params = self.get_flattened_parameters()
-            flattened_params[:] = flattened_params[best_idx:best_idx+1]
-            self.set_flattened_parameters(flattened_params)
-            
-            # Break if no improvement (best model is still the original at index 0)
-            if best_idx == 0:
-                break
-
-    @torch.no_grad()
-    def reset_parameters(self):
-        """Reset all model parameters."""
-        for transformer in self.transformers:
-            def reset_module(m):
-                if hasattr(m, 'reset_parameters'):
-                    m.reset_parameters()
-                elif hasattr(m, 'weight'):
-                    nn.init.xavier_uniform_(m.weight)
-                    if hasattr(m, 'bias') and m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-            transformer.apply(reset_module)
-
-    @torch.no_grad()
-    def reinitialize(self, mult=1):
-        """Reinitialize all model parameters with uniform distribution."""
-        for transformer in self.transformers:
-            for param in transformer.parameters():
-                nn.init.uniform_(param, -mult, mult)
-
-    def forward_normalize(self, x):
-        """Forward pass with normalization - for compatibility with existing code."""
-        return self.forward(x)
-
-    @torch.no_grad()
-    def get_weights_by_idx(self, idx):
-        """Get weights for specific model indices."""
-        if isinstance(idx, torch.Tensor):
-            if idx.dtype == torch.bool:
-                # Convert boolean tensor to integer indices
-                idx = idx.nonzero(as_tuple=True)[0].cpu().numpy()
-            else:
-                idx = idx.cpu().numpy()
-        elif isinstance(idx, int):
-            idx = [idx]
-        
-        state_dicts = []
-        for i in idx:
-            state_dicts.append({k: v.clone().cpu() for k, v in self.transformers[i].state_dict().items()})
-        return state_dicts
-
-    def get_model_subsets(self, idx):
-        """Create a new TransformerModels with subset of models."""
-        if isinstance(idx, torch.Tensor):
-            idx = idx.tolist()
-        elif isinstance(idx, int):
-            idx = [idx]
-            
-        new_model_count = len(idx)
-        new_model = TransformerModels(
-            vocab_size=self.vocab_size,
-            d_model=self.d_model,
-            n_layers=self.n_layers,
-            n_heads=self.n_heads,
-            d_ff=self.d_ff,
-            max_len=self.max_len,
-            model_count=new_model_count,
-            device=self.device,
-            dropout=self.dropout,
-            sep_token_id=self.sep_token_id,
-            pad_token_id=self.pad_token_id
-        )
-        
-        # Copy the selected transformers
-        for new_idx, old_idx in enumerate(idx):
-            new_model.transformers[new_idx].load_state_dict(self.transformers[old_idx].state_dict())
-        
-        return new_model
+        #return new_model
 if __name__ == "__main__":
     model = MLPModels(input_dim=2, output_dim=2,
               layers=1, hidden_units=3,

@@ -1,33 +1,30 @@
 output:
   folder: output/counting/transformer_pattern
-  target_model_count: 100
+  target_model_count: 1
 dataset:
   name: counting
-  seed: 100
   counting:
     min_range_size: 1
-    max_range_size: 10
-    vocab_size: 20
+    max_range_size: 5 
+    vocab_size: 110 
     sep_token: 102
     pad_token: 103
 model:
   arch: transformer
   transformer:
-    d_model: 128
-    n_layers: 4
-    n_heads: 8
-    d_ff: 512
+    d_model: 32 
+    n_layers: 2
+    n_heads: 4
+    d_ff: 64 
     max_len: 64
-    dropout: 0.1
-  model_count_times_batch_size: 1000
+    dropout: 0.0
+  model_count_times_batch_size: 10000 
   init: regular
 optimizer:
   name: PatternSearchFast
   epochs: 10000
-  es_acc: 0.95
-training:
-  seed: 0
+  es_acc: 0.98
 distributed:
-  loss_thres: -999,999
-  num_samples: 500
-  target_model_count_subrun: 10
+  loss_thres: "-999,999"
+  num_samples: "2000"
+  target_model_count_subrun: 1

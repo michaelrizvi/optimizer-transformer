@@ -11,6 +11,7 @@ from optimizer import NelderMead, PatternSearch
 import time
 import json
 from sql import *
+from transformer_models import TransformerModels
 
 Section("dataset", "Dataset parameters").params(
     name=Param(str, OneOf(("mnist", "kink", "cifar10", "slab", "slab_nonlinear_3", "slab_nonlinear_4", "slab_linear", "counting")), default="kink"),
