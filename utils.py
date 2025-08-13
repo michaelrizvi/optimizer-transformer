@@ -875,19 +875,24 @@ class TransformerModels(nn.Module):
         self.basis_list = None
         self.curr_idx = 0
         self.radius = 0.1
+        self.best_loss = None
 
     def forward(self, x, position_ids=None):
         # x shape: (batch_size, seq_len)
         # Output shape: (batch_size, model_count, seq_len, vocab_size)
+        return self.forward_batch(x, self.model_count, position_ids)
+    
+    def forward_batch(self, x, num_active_transformers, position_ids=None):
+        """Forward pass using only the first num_active_transformers."""
         batch_size, seq_len = x.size()
         
         outputs = []
-        for i, transformer in enumerate(self.transformers):
-            out = transformer(x, position_ids)  # (batch_size, seq_len, vocab_size)
+        for i in range(num_active_transformers):
+            out = self.transformers[i](x, position_ids)  # (batch_size, seq_len, vocab_size)
             outputs.append(out.unsqueeze(1))  # (batch_size, 1, seq_len, vocab_size)
         
         # Stack along model dimension
-        outputs = torch.cat(outputs, dim=1)  # (batch_size, model_count, seq_len, vocab_size)
+        outputs = torch.cat(outputs, dim=1)  # (batch_size, num_active_transformers, seq_len, vocab_size)
         return outputs
 
     def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
@@ -996,10 +1001,25 @@ class TransformerModels(nn.Module):
         
         logits = self(x, position_ids=pos_ids)
         return self.loss_function(y, logits)
+    
+    def get_optimal_batch_size(self):
+        """Determine optimal batch size for pattern search based on available models and memory."""
+        available_models = self.model_count - 1  # Reserve transformer[0] as baseline
+        
+        if available_models <= 0:
+            return 1
+        
+        # Conservative batch size limits
+        if torch.cuda.is_available():
+            max_batch_size = min(available_models, 64)  # Cap at reasonable limit for GPU
+        else:
+            max_batch_size = min(available_models, 16)  # Smaller for CPU
+        
+        return max_batch_size
 
     @torch.no_grad()
     def pattern_search(self, data, dummy_labels, loss_func):
-        """Pattern search optimization adapted for ModuleList of transformers."""
+        """Fast batch evaluation pattern search for ModuleList transformers."""
         import random
         
         # Create x and y for next-token prediction
@@ -1018,74 +1038,83 @@ class TransformerModels(nn.Module):
                     # Each basis element: (param_name, param_flat_idx, direction)
                     self.basis_list.append((param_name, param_idx, "+"))
                     self.basis_list.append((param_name, param_idx, "-"))
-        
-        random.shuffle(self.basis_list)
-        self.curr_idx = 0
-        max_attempts = min(len(self.basis_list), self.model_count - 1)
-        
-        while True:
-            # Step 1: Copy transformer[0] state to all other transformers
-            base_state_dict = self.transformers[0].state_dict()
-            for i in range(1, self.model_count):
-                self.transformers[i].load_state_dict(base_state_dict)
             
-            # Step 2: Perturb each transformer (except 0) at different parameter locations
-            improvements_found = 0
-            modifications = []  # Track modifications for debugging
+            random.shuffle(self.basis_list)
+        
+        # Initialize best loss if needed
+        if self.best_loss is None:
+            # Get initial loss using only transformer[0]
+            pred = self.forward_batch(x, 1, position_ids=None)  # Only evaluate transformer[0]
+            self.best_loss = self.loss_function(y, pred)[0].detach().clone()
+        
+        # Save original state of transformer[0]
+        original_state = self.transformers[0].state_dict()
+        
+        # Get optimal batch size for this hardware/model configuration
+        batch_size = self.get_optimal_batch_size()
+        
+        # Process perturbations in batches
+        for batch_start in range(0, len(self.basis_list), batch_size):
+            batch_end = min(batch_start + batch_size, len(self.basis_list))
+            current_batch = self.basis_list[batch_start:batch_end]
             
-            for i in range(1, min(self.model_count, max_attempts + 1)):
-                if self.curr_idx >= len(self.basis_list):
-                    break
+            if not current_batch:
+                break
+            
+            # Reset all transformers to baseline (transformer[0])
+            for i in range(1, len(current_batch) + 1):
+                if i < self.model_count:  # Safety check
+                    self.transformers[i].load_state_dict(original_state)
+            
+            # Apply different perturbation to each transformer
+            for idx, (param_name, param_idx, direction) in enumerate(current_batch):
+                transformer_idx = idx + 1  # Skip transformer[0] (baseline)
                 
-                param_name, param_idx, direction = self.basis_list[self.curr_idx]
+                if transformer_idx >= self.model_count:
+                    break  # Safety check
                 
-                # Apply perturbation to transformer i at the specified parameter location
-                target_param = dict(self.transformers[i].named_parameters())[param_name]
+                target_param = dict(self.transformers[transformer_idx].named_parameters())[param_name]
                 target_param_flat = target_param.data.view(-1)
                 
                 if direction == "+":
                     target_param_flat[param_idx] += self.radius
                 else:
                     target_param_flat[param_idx] -= self.radius
+            
+            # BATCH EVALUATION - One forward pass for all perturbations + baseline
+            active_transformers = len(current_batch) + 1  # +1 for baseline transformer[0]
+            pred = self.forward_batch(x, active_transformers, position_ids=None)
+            loss = self.loss_function(y, pred)
+            
+            # Check if any perturbation is better than baseline
+            baseline_loss = loss[0]  # Loss of transformer[0]
+            
+            if len(loss) > 1:  # We have perturbations to compare
+                perturbation_losses = loss[1:]  # Losses of perturbed models
+                best_perturbation_idx = perturbation_losses.argmin()
+                best_perturbation_loss = perturbation_losses[best_perturbation_idx]
                 
-                modifications.append((i, param_name, param_idx, direction))
-                self.curr_idx += 1
-            
-            # Step 3: Forward pass through all transformers
-            pred = self.forward(x, position_ids=None)  # (batch_size, model_count, seq_len, vocab_size)
-            loss = self.loss_function(y, pred)  # (model_count,)
-            
-            # Step 4: Find best model
-            best_idx = loss.argmin()
-            best_loss = loss[best_idx]
-            current_loss = loss[0]
-            
-            # Step 5: Copy best model to position 0 if it's better
-            if best_loss < current_loss:
-                best_state_dict = self.transformers[best_idx].state_dict()
-                self.transformers[0].load_state_dict(best_state_dict)
-                improvements_found += 1
-            
-            # Step 6: Check termination conditions
-            if self.curr_idx >= len(self.basis_list):
-                if improvements_found == 0:
-                    # No improvements found in full sweep, reduce radius
-                    self.radius *= 0.8  # Less aggressive reduction
-                    print(f"Pattern search: radius reduced to {self.radius:.6f}")
-                    if self.radius < 1e-10:
-                        print("Pattern search: radius too small, stopping")
-                        break
-                else:
-                    # Some improvements found, continue with current radius
-                    print(f"Pattern search: found {improvements_found} improvements")
-                
-                random.shuffle(self.basis_list)
-                self.curr_idx = 0
-                max_attempts = min(len(self.basis_list), self.model_count - 1)
-            
-            # Step 7: Stop if we made a significant improvement
-            if best_idx != 0 and improvements_found > 0:
-                break
+                if best_perturbation_loss < self.best_loss:
+                    # Found improvement! Copy best perturbation to transformer[0]
+                    best_transformer_idx = best_perturbation_idx + 1
+                    best_state = self.transformers[best_transformer_idx].state_dict()
+                    self.transformers[0].load_state_dict(best_state)
+                    
+                    old_loss = self.best_loss
+                    self.best_loss = best_perturbation_loss.detach().clone()
+                    print(f"Pattern search: improvement found, {old_loss:.6f} -> {self.best_loss:.6f}")
+                    return  # Exit early like optimizer.py PatternSearch
+        
+        # If no improvements found in full sweep, reduce radius
+        self.radius *= 0.5
+        print(f"Pattern search: no improvements found, radius reduced to {self.radius:.6f}")
+        
+        if self.radius < 1e-8:
+            print("Pattern search: radius too small, stopping")
+            return
+        
+        # Shuffle for next iteration
+        random.shuffle(self.basis_list)
 
     @torch.no_grad()
     def reset_parameters(self):
