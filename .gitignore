@@ -151,3 +151,4 @@ table/*
 simplicity_bias/
 sqltest/
 output/*
+wandb/

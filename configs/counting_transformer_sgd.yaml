@@ -18,13 +18,13 @@ model:
     d_ff: 128 
     max_len: 64
     dropout: 0.1
-  model_count_times_batch_size: 500
+  model_count_times_batch_size: 128 
   init: regular
 optimizer:
   name: SGD
   lr: 0.001
   epochs: 400
-  batch_size: 100 
+  batch_size: 128 
   es_acc: 0.99
   momentum: 0.9
 distributed:

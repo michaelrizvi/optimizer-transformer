@@ -1044,7 +1044,7 @@ class TransformerModels(nn.Module):
         # Pattern search state
         self.basis_list = None
         self.curr_idx = 0
-        self.radius = 0.1
+        self.radius = 1 
         
         # Initialize parameters
         self._init_vectorized_params()
