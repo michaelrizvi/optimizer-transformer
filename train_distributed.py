@@ -413,17 +413,36 @@ def train_ps(train_data, train_labels, test_data, test_labels, model, loss_func,
 @section('optimizer')
 @param('epochs')
 @param('es_acc')
+@param('use_position_offsets', default=False)
+@param('max_position_offset', default=32)
 @torch.no_grad()
-def train_ps_fast(train_data, train_labels, test_data, test_labels, model, loss_func, optimizer, epochs, es_acc=2):
+def train_ps_fast(train_data, train_labels, test_data, test_labels, model, loss_func, optimizer, epochs, es_acc=2, use_position_offsets=False, max_position_offset=32):
+    from utils import sample_position_offset, evaluate_with_offsets
+    
     for epoch in range(epochs):
-        model.pattern_search(train_data, train_labels, loss_func)
+        if use_position_offsets:
+            # Sample random position offset for this epoch
+            max_offset = min(max_position_offset, model.max_len - train_data.size(1))
+            position_offset = sample_position_offset(max_offset, train_data.size(1) - 1, model.max_len)  # -1 for x = data[:, :-1]
+            model.pattern_search(train_data, train_labels, loss_func, position_offset=position_offset)
+        else:
+            # Standard training without offsets
+            model.pattern_search(train_data, train_labels, loss_func)
+            
         if epoch % (epochs // 100) == 0:
-            train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
-            test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
-            print(
-                f"epoch {epoch} - train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}, train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}")
-            print(
-                f"epoch {epoch} - test acc: {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
+            if use_position_offsets:
+                # Evaluate across multiple offsets
+                train_loss, train_acc = evaluate_with_offsets(train_data, train_labels, model, loss_func, num_offset_tests=5)
+                test_loss, test_acc = evaluate_with_offsets(test_data, test_labels, model, loss_func, num_offset_tests=5)
+                print(f"epoch {epoch} - train_loss (multi-offset): {train_loss.mean().cpu().detach().item(): 0.4f}, train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}")
+                print(f"epoch {epoch} - test acc (multi-offset): {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
+            else:
+                # Standard single-offset evaluation
+                train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
+                test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
+                print(f"epoch {epoch} - train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}, train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}")
+                print(f"epoch {epoch} - test acc: {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
+                
             if train_acc.mean() >= es_acc:
                 break
     return model.get_model_subsets([0]).to(train_data.device)

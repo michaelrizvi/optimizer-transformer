@@ -8,6 +8,98 @@ from itertools import chain
 import random
 from transformer import DecoderOnlyTransformer
 
+def sample_position_offset(max_offset, seq_len, max_len):
+    """
+    Sample random positional offset ensuring seq_len + offset <= max_len.
+    
+    Args:
+        max_offset: Maximum desired offset
+        seq_len: Length of sequence
+        max_len: Maximum positional encoding length
+        
+    Returns:
+        int: Random offset in valid range [0, min(max_offset, max_len - seq_len)]
+             Returns 0 if seq_len >= max_len (no valid offset possible)
+    """
+    if seq_len >= max_len:
+        # No valid offset possible - sequence too long for max_len
+        return 0
+        
+    max_valid_offset = min(max_offset, max_len - seq_len)
+    if max_valid_offset <= 0:
+        return 0
+    return torch.randint(0, max_valid_offset + 1, (1,)).item()
+
+def evaluate_with_offsets(data, labels, model, loss_func, num_offset_tests=5, batch_size=None):
+    """
+    Test model performance across different positional offsets.
+    
+    Args:
+        data: Input sequences
+        labels: Target labels (ignored for transformer counting task)
+        model: Transformer model to evaluate
+        loss_func: Loss function (ignored - uses model's loss function)
+        num_offset_tests: Number of different offsets to test
+        batch_size: Optional batch size for evaluation
+        
+    Returns:
+        tuple: (average_losses, average_accuracies) across offsets
+    """
+    max_offset = max(0, model.max_len - data.size(1))
+    
+    # Test at evenly spaced offsets
+    if max_offset == 0:
+        # No room for offsets, just use 0
+        test_offsets = [0]
+    else:
+        test_offsets = [int(i * max_offset / max(1, num_offset_tests - 1)) 
+                       for i in range(min(num_offset_tests, max_offset + 1))]
+    
+    all_losses = []
+    all_accs = []
+    
+    for offset in test_offsets:
+        if batch_size is None:
+            x = data[:, :-1]
+            y = data[:, 1:]
+            
+            with torch.no_grad():
+                logits = model(x, position_offset=offset)
+                loss = model.loss_function(y, logits)
+                acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+                
+            all_losses.append(loss)
+            all_accs.append(acc)
+        else:
+            # Batched evaluation
+            batch_losses = []
+            batch_accs = []
+            
+            for i in range(0, len(data), batch_size):
+                batch_data = data[i:min(i+batch_size, len(data))]
+                x = batch_data[:, :-1]
+                y = batch_data[:, 1:]
+                
+                with torch.no_grad():
+                    logits = model(x, position_offset=offset)
+                    loss = model.loss_function(y, logits)
+                    acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+                
+                batch_losses.append(loss)
+                batch_accs.append(acc)
+            
+            # Average across batches
+            all_losses.append(torch.stack(batch_losses).mean(dim=0))
+            all_accs.append(torch.stack(batch_accs).mean(dim=0))
+    
+    # Return average across offsets
+    if len(all_losses) > 1:
+        avg_loss = torch.stack(all_losses).mean(dim=0)
+        avg_acc = torch.stack(all_accs).mean(dim=0)
+        return avg_loss, avg_acc
+    else:
+        return all_losses[0], all_accs[0]
+
 def calculate_loss_acc_vanilla(data, labels, model, loss_func, batch_size=None):
     if batch_size is None:
         pred = model(data)  # pred.shape = (# of examples, # model counts , output_dim)
@@ -1150,7 +1242,7 @@ class TransformerModels(nn.Module):
         logits = torch.einsum('bmsd,mdv->bmsv', x, self.head_weight) + self.head_bias.unsqueeze(0).unsqueeze(2)
         return logits
 
-    def forward(self, x, position_ids=None):
+    def forward(self, x, position_ids=None, position_offset=None):
         # x shape: (batch_size, seq_len)  
         # Output shape: (batch_size, model_count, seq_len, vocab_size)
         batch_size, seq_len = x.size()
@@ -1158,10 +1250,18 @@ class TransformerModels(nn.Module):
         # Token embeddings - vectorized across models
         token_emb = self.vectorized_token_embedding(x)  # (batch_size, model_count, seq_len, d_model)
         
-        # Position embeddings
+        # Position embeddings with optional offset
         if position_ids is not None:
             pos_emb = self.vectorized_position_embedding(position_ids)
+        elif position_offset is not None:
+            # Apply positional offset: use positions [offset, offset+1, ..., offset+seq_len-1]
+            if position_offset + seq_len > self.max_len:
+                raise ValueError(f"position_offset ({position_offset}) + seq_len ({seq_len}) exceeds max_len ({self.max_len})")
+            
+            # Use consistent indexing approach: slice the position embeddings directly
+            pos_emb = self.pos_emb[:, position_offset:position_offset + seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
         else:
+            # Original default behavior: use positions [0, 1, 2, ..., seq_len-1]
             pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
         
         # Add embeddings
@@ -1303,13 +1403,18 @@ class TransformerModels(nn.Module):
         return self.loss_function(y, logits)
 
     @torch.no_grad()
-    def pattern_search(self, data, dummy_labels, loss_func):
+    def pattern_search(self, data, dummy_labels, loss_func, position_offset=None):
         """Pattern search following LeNet approach - adapted for TransformerModels."""
         import random
         
         # Create x and y for next-token prediction
         x = data[:, :-1]
         y = data[:, 1:]
+        
+        # Sample random position offset if not provided
+        if position_offset is None:
+            max_offset = max(0, self.max_len - data.size(1))  # Maximum valid offset for this sequence length
+            position_offset = sample_position_offset(max_offset, x.size(1), self.max_len)
         
         # Initialize basis list if not already done (LeNet approach #1)
         if self.basis_list is None:
@@ -1352,8 +1457,8 @@ class TransformerModels(nn.Module):
                     param_flatten[i, p_i] -= self.radius
                 self.curr_idx += 1
             
-            # Forward pass and evaluate all models
-            logits = self(x, position_ids=None)  # (batch_size, model_count, seq_len, vocab_size)
+            # Forward pass and evaluate all models with position offset
+            logits = self(x, position_ids=None, position_offset=position_offset)  # (batch_size, model_count, seq_len, vocab_size)
             losses = self.loss_function(y, logits)  # (model_count,)
             
             # LeNet approach #5: Simple success detection (best_idx != 0)
