@@ -1297,109 +1297,75 @@ class TransformerModels(nn.Module):
 
     @torch.no_grad()
     def pattern_search(self, data, dummy_labels, loss_func):
-        """Vectorized batch evaluation pattern search following LeNet design pattern."""
+        """Pattern search following LeNet approach - adapted for TransformerModels."""
         import random
         
-        # Create x and y for next-token prediction (same as before)
+        # Create x and y for next-token prediction
         x = data[:, :-1]
         y = data[:, 1:]
         
-        # Initialize basis list if not already done
+        # Initialize basis list if not already done (LeNet approach #1)
         if self.basis_list is None:
             self.basis_list = []
-            
-            # Create basis list for all vectorized parameters
-            for param_name, param in self.named_parameters():
-                # Check if this is a vectorized parameter (first dimension is model_count)
+            for param in self.parameters():
                 if param.dim() >= 2 and param.size(0) == self.model_count:
-                    # Get shape without model_count dimension
-                    param_shape = param.shape[1:]  # Remove model_count dimension
-                    param_size = param_shape.numel()
-                    
-                    for param_idx in range(param_size):
-                        # Each basis element: (param_name, param_flat_idx, direction)
-                        self.basis_list.append((param_name, param_idx, "+"))
-                        self.basis_list.append((param_name, param_idx, "-"))
-            
+                    # Flatten parameter keeping model_count dimension (like LeNet)
+                    param_flatten = param.data.view(self.model_count, -1)
+                    for p in range(param_flatten.shape[1]):
+                        self.basis_list.append((param_flatten, p, "+"))
+                        self.basis_list.append((param_flatten, p, "-"))
             random.shuffle(self.basis_list)
             print(f"Created basis list with {len(self.basis_list)} elements")
         
-        # Initialize best loss if needed
-        if not hasattr(self, 'best_loss') or self.best_loss is None:
-            # Get initial loss - forward pass returns (batch_size, model_count, seq_len, vocab_size)
-            logits = self(x, position_ids=None)
-            initial_losses = self.loss_function(y, logits)  # (model_count,)
-            self.best_loss = initial_losses[0].detach().clone()  # Use model 0 as baseline
+        random.shuffle(self.basis_list)
+        self.curr_idx = 0
         
-        # Copy model 0 parameters to all other models (LeNet pattern)
-        self._copy_model_0_to_all()
-        
-        # Process basis list in chunks that fit within model_count
-        max_perturbations_per_batch = self.model_count - 1  # Reserve model 0 as baseline
-        
-        for basis_start in range(0, len(self.basis_list), max_perturbations_per_batch):
-            basis_end = min(basis_start + max_perturbations_per_batch, len(self.basis_list))
-            current_basis = self.basis_list[basis_start:basis_end]
+        # LeNet approach #2: No best_loss initialization - use immediate comparison
+        # LeNet approach #3: Simple while loop
+        while True:
+            # Copy model 0 to all other models (replicate first model)
+            for param in self.parameters():
+                if param.dim() >= 2 and param.size(0) == self.model_count:
+                    param_reshaped = param.data.view(self.model_count, -1)
+                    param_reshaped[1:] = param_reshaped[0:1]
             
-            if not current_basis:
-                break
-            
-            # Re-copy model 0 to all others before applying perturbations
-            self._copy_model_0_to_all()
-            
-            # Apply different perturbations to models 1, 2, 3, ... (keep model 0 as baseline)
-            for basis_idx, (param_name, param_flat_idx, direction) in enumerate(current_basis):
-                model_idx = basis_idx + 1  # Start from model 1 (model 0 is baseline)
+            # LeNet approach #4: Apply perturbations to each model sequentially
+            for i in range(1, self.model_count):
+                if self.curr_idx >= len(self.basis_list):
+                    print("went over everything")
+                    random.shuffle(self.basis_list)
+                    self.radius /= 2
+                    self.curr_idx = 0
+                    break
                 
-                if model_idx >= self.model_count:
-                    break  # Safety check
-                
-                # Get the parameter and apply perturbation
-                param = dict(self.named_parameters())[param_name]
-                
-                # Convert flat index back to multidimensional index for the parameter
-                param_shape = param.shape[1:]  # Shape without model_count dimension
-                multi_idx = torch.unravel_index(torch.tensor(param_flat_idx), param_shape)
-                
-                # Create full index including model dimension
-                full_idx = tuple([model_idx] + [idx.item() for idx in multi_idx])
-                
-                # Apply perturbation
-                if direction == "+":
-                    param.data[full_idx] += self.radius
+                param_flatten, p_i, op = self.basis_list[self.curr_idx]
+                if op == "+":
+                    param_flatten[i, p_i] += self.radius
                 else:
-                    param.data[full_idx] -= self.radius
+                    param_flatten[i, p_i] -= self.radius
+                self.curr_idx += 1
+                
+                if self.curr_idx >= len(self.basis_list):
+                    print("went over everything")
+                    random.shuffle(self.basis_list)
+                    self.radius /= 2
+                    self.curr_idx = 0
+                    break
             
-            # BATCH EVALUATION - One forward pass for baseline + all perturbations
+            # Forward pass and evaluate all models
             logits = self(x, position_ids=None)  # (batch_size, model_count, seq_len, vocab_size)
             losses = self.loss_function(y, logits)  # (model_count,)
             
-            # Check if any perturbation improved over baseline
-            baseline_loss = losses[0]  # Model 0 loss
+            # LeNet approach #5: Simple success detection (best_idx != 0)
+            best_idx = losses.argmin()
             
-            if len(current_basis) > 0:
-                # Get losses for the perturbed models 
-                perturbation_losses = losses[1:len(current_basis)+1]
-                best_perturbation_idx = perturbation_losses.argmin()
-                best_perturbation_loss = perturbation_losses[best_perturbation_idx]
-                
-                if best_perturbation_loss < self.best_loss:
-                    # Found improvement! Copy best perturbation parameters to model 0
-                    best_model_idx = best_perturbation_idx + 1
-                    self._copy_model_to_model_0(best_model_idx)
-                    
-                    old_loss = self.best_loss
-                    self.best_loss = best_perturbation_loss.detach().clone()
-                    print(f"Pattern search: improvement found, {old_loss:.6f} -> {self.best_loss:.6f}")
-                    return  # Exit early like optimizer.py PatternSearch
-        
-        # If no improvements found in full sweep, reduce radius
-        self.radius *= 0.5
-        print(f"Pattern search: no improvements found, radius reduced to {self.radius:.6f}")
-        
-        if self.radius < 1e-8:
-            print("Pattern search: radius too small, stopping")
-            return
+            # Copy best model to position 0
+            if best_idx != 0:
+                for param in self.parameters():
+                    if param.dim() >= 2 and param.size(0) == self.model_count:
+                        param_reshaped = param.data.view(self.model_count, -1)
+                        param_reshaped[:] = param_reshaped[best_idx:best_idx+1]
+                break  # Found improvement, exit
     
     def _copy_model_0_to_all(self):
         """Copy model 0 parameters to all other models (LeNet pattern)."""
