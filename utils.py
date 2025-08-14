@@ -1193,13 +1193,16 @@ class TransformerModels(nn.Module):
         
         # Ensure target is (B, S)
         if target.dim() == 1:
-            # Try to reshape to (B, S) - assume square batch
-            total_len = target.size(0)
-            batch_size = int(total_len ** 0.5)
-            if batch_size * batch_size == total_len:
-                target = target.view(batch_size, batch_size)
+            # Infer batch_size and seq_len from logits shape
+            if logits.dim() == 4:
+                expected_batch_size, _, expected_seq_len, _ = logits.size()
+                expected_total = expected_batch_size * expected_seq_len
+                if target.size(0) == expected_total:
+                    target = target.reshape(expected_batch_size, expected_seq_len)
+                else:
+                    raise ValueError(f"Target size {target.size(0)} doesn't match expected {expected_total}")
             else:
-                raise ValueError(f"Cannot reshape target with size {total_len} to (B, S)")
+                raise ValueError(f"Cannot infer target shape from logits shape {logits.shape}")
         
         # Compute loss per model separately (avoids partitioning bug)
         losses = []
@@ -1217,9 +1220,9 @@ class TransformerModels(nn.Module):
                 continue
                 
             # Flatten and filter
-            flat_logits = model_logits.view(-1, vocab_size)  # (B*S, V)
-            flat_target = model_target.view(-1)  # (B*S,)
-            flat_mask = mask.view(-1)  # (B*S,)
+            flat_logits = model_logits.reshape(-1, vocab_size)  # (B*S, V)
+            flat_target = model_target.reshape(-1)  # (B*S,)
+            flat_mask = mask.reshape(-1)  # (B*S,)
             
             # Apply mask
             filtered_logits = flat_logits[flat_mask]  # (valid_tokens, V)
