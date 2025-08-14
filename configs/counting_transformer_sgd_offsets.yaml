@@ -16,19 +16,19 @@ model:
     n_layers: 2
     n_heads: 4
     d_ff: 128 
-    max_len: 128  # Increased from 64 to accommodate position offsets
+    max_len: 64  # Increased from 64 to accommodate position offsets
     dropout: 0.1
-  model_count_times_batch_size: 500
+  model_count_times_batch_size: 128
   init: regular
 optimizer:
   name: SGD
   lr: 0.001
   epochs: 400
-  batch_size: 100 
+  batch_size: 128
   es_acc: 0.99
   momentum: 0.9
   use_position_offsets: true      # Enable positional offset training
-  max_position_offset: 64         # Maximum offset to sample (sequences can start at positions 0-64)
+  max_position_offset: 32         # Maximum offset to sample (sequences can start at positions 0-64)
 distributed:
   loss_thres: "-999,999"
   num_samples: "2000"
