@@ -1364,7 +1364,7 @@ class TransformerModels(nn.Module):
                 for param in self.parameters():
                     if param.dim() >= 2 and param.size(0) == self.model_count:
                         param_reshaped = param.data.view(self.model_count, -1)
-                        param_reshaped[:] = param_reshaped[best_idx:best_idx+1]
+                        param_reshaped[:] = param_reshaped[best_idx:best_idx+1].clone()
                 break  # Found improvement, exit
     
     def _copy_model_0_to_all(self):
