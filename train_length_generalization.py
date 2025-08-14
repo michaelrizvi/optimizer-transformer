@@ -486,6 +486,12 @@ def run_experiment(num_runs, device, seed):
         # Final evaluation
         print(f"\nFinal evaluation for run {run + 1}:")
         with torch.no_grad():
+            # Ensure model and data are on the same device
+            model_device = next(trained_model.parameters()).device
+            train_data = train_data.to(model_device)
+            val_data = val_data.to(model_device)
+            test_data = test_data.to(model_device)
+            
             config = get_current_config()
             if config['optimizer.use_position_offsets']:
                 train_loss, train_acc = evaluate_with_offsets(train_data, None, trained_model, None, num_offset_tests=5)
