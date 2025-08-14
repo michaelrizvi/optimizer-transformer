@@ -100,6 +100,49 @@ def evaluate_with_offsets(data, labels, model, loss_func, num_offset_tests=5, ba
     else:
         return all_losses[0], all_accs[0]
 
+def calculate_loss_acc_with_offset(data, labels, model, loss_func, position_offset, batch_size=None):
+    """
+    Calculate loss and accuracy with a specific positional offset.
+    Similar to calculate_transformer_loss_acc but uses position_offset.
+    """
+    if batch_size is None:
+        # For next-token prediction: input = seq[:-1], target = seq[1:]
+        x = data[:, :-1]  # All tokens except last
+        y = data[:, 1:]   # All tokens except first (shifted by 1)
+        
+        logits = model(x, position_offset=position_offset)  # (batch_size, model_count, seq_len, vocab_size)
+        
+        # Use model's loss function which handles padding
+        loss = model.loss_function(y, logits)  # (model_count,)
+        
+        # Calculate token-wise accuracy on answer portion only
+        acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+        
+        return loss, acc
+    else:
+        # Batched processing
+        all_losses = []
+        all_accs = []
+        
+        for i in range(0, len(data), batch_size):
+            batch_data = data[i:min(i+batch_size, len(data))]
+            
+            x = batch_data[:, :-1]
+            y = batch_data[:, 1:]
+            
+            logits = model(x, position_offset=position_offset)
+            loss = model.loss_function(y, logits)
+            acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
+            
+            all_losses.append(loss)
+            all_accs.append(acc)
+        
+        # Average across batches
+        loss = torch.stack(all_losses).mean(dim=0)
+        acc = torch.stack(all_accs).mean(dim=0)
+        
+        return loss, acc
+
 def calculate_loss_acc_vanilla(data, labels, model, loss_func, batch_size=None):
     if batch_size is None:
         pred = model(data)  # pred.shape = (# of examples, # model counts , output_dim)

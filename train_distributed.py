@@ -260,14 +260,24 @@ def get_optimizer_and_scheduler(name, model, scheduler=False, lr=None, momentum=
 @param('es_u')
 @param('es_acc')
 @param('print_intermediate_test_acc')
+@param('use_position_offsets', default=False)
+@param('max_position_offset', default=32)
 def train_sgd(
-    train_data, train_labels, test_data, test_labels, model, loss_func, optimizer, scheduler, batch_size, epochs, es_u, es_acc=1, print_intermediate_test_acc=0):
+    train_data, train_labels, test_data, test_labels, model, loss_func, optimizer, scheduler, batch_size, epochs, es_u, es_acc=1, print_intermediate_test_acc=0, use_position_offsets=False, max_position_offset=32):
+    from utils import sample_position_offset
 
     for epoch in range(epochs):
         idx_list = torch.randperm(len(train_data))
         for st_idx in range(0, len(train_data), batch_size):
             idx = idx_list[st_idx:min(st_idx + batch_size, len(train_data))]
-            train_loss, train_acc = calculate_loss_acc(train_data[idx], train_labels[idx], model, loss_func)
+            
+            if use_position_offsets:
+                # Sample random position offset for this batch
+                max_offset = min(max_position_offset, model.max_len - train_data.size(1))
+                position_offset = sample_position_offset(max_offset, train_data.size(1) - 1, model.max_len)  # -1 for next-token prediction
+                train_loss, train_acc = calculate_loss_acc_with_offset(train_data[idx], train_labels[idx], model, loss_func, position_offset)
+            else:
+                train_loss, train_acc = calculate_loss_acc(train_data[idx], train_labels[idx], model, loss_func)
 
 
             #if es_u != float('inf'):
@@ -286,16 +296,24 @@ def train_sgd(
         scheduler.step()
         with torch.no_grad():
             if epoch % (epochs // 100 + 1) == 0:
-                train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
-                test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
-                if len(train_loss[train_acc==1]) > 0:
-                    print(f"train loss range: {train_loss[train_acc==1].max().item()} {train_loss[train_acc==1].min().item()}")
-                train_loss = train_loss[~train_loss.isnan()]
-                test_loss = test_loss[~test_loss.isnan()]
-                print(
-                    f"epoch {epoch} -  train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}, train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}")
-                print(
-                    f"epoch {epoch} - test acc: {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
+                if use_position_offsets:
+                    # Evaluate across multiple offsets
+                    from utils import evaluate_with_offsets
+                    train_loss, train_acc = evaluate_with_offsets(train_data, train_labels, model, loss_func, num_offset_tests=5)
+                    test_loss, test_acc = evaluate_with_offsets(test_data, test_labels, model, loss_func, num_offset_tests=5)
+                    print(f"epoch {epoch} - train_acc (multi-offset): {train_acc.mean().cpu().detach().item(): 0.2f}, train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}")
+                    print(f"epoch {epoch} - test acc (multi-offset): {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
+                else:
+                    # Standard single-offset evaluation
+                    train_loss, train_acc = calculate_loss_acc(train_data, train_labels, model, loss_func)
+                    test_loss, test_acc = calculate_loss_acc(test_data, test_labels, model, loss_func)
+                    if len(train_loss[train_acc==1]) > 0:
+                        print(f"train loss range: {train_loss[train_acc==1].max().item()} {train_loss[train_acc==1].min().item()}")
+                    train_loss = train_loss[~train_loss.isnan()]
+                    test_loss = test_loss[~test_loss.isnan()]
+                    print(f"epoch {epoch} -  train_acc: {train_acc.mean().cpu().detach().item(): 0.2f}, train_loss: {train_loss.mean().cpu().detach().item(): 0.4f}")
+                    print(f"epoch {epoch} - test acc: {test_acc.mean().item(): 0.2f}, test loss: {test_loss.mean().item(): 0.2f}")
+                
                 if print_intermediate_test_acc:
                     _, test_acc = calculate_loss_acc(test_all_data.cuda(), test_all_labels.cuda(), model, loss_func, batch_size=batch_size)
                     print("test acc (all):", test_acc)
