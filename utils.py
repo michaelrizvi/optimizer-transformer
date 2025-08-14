@@ -1180,54 +1180,58 @@ class TransformerModels(nn.Module):
         return logits
 
     def loss_function(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
-        """Cross entropy loss ignoring pad tokens."""
-        # Infer actual model count from logits tensor
+        """Cross entropy loss ignoring pad tokens - fixed per-model calculation."""
+        # Handle different input dimensions
         if logits.dim() == 4:  # (B, M, S, V)
-            actual_model_count = logits.size(1)
-            logits = logits.reshape(-1, logits.size(-1))  # (B*M*S, V)
-        elif logits.dim() == 3:  # (B, S, V) - single model case
-            actual_model_count = 1
-            logits = logits.reshape(-1, logits.size(-1))  # (B*S, V)
-        else:  # Already flattened
-            # Try to infer from target and logits shapes
-            if target.dim() == 2:
-                batch_size, seq_len = target.size()
-                expected_tokens = batch_size * seq_len
-                actual_tokens = logits.size(0)
-                actual_model_count = actual_tokens // expected_tokens
+            batch_size, model_count, seq_len, vocab_size = logits.size()
+        elif logits.dim() == 3:  # (B, S, V) - single model case  
+            batch_size, seq_len, vocab_size = logits.size()
+            model_count = 1
+            logits = logits.unsqueeze(1)  # (B, 1, S, V)
+        else:
+            raise ValueError(f"Unexpected logits shape: {logits.shape}")
+        
+        # Ensure target is (B, S)
+        if target.dim() == 1:
+            # Try to reshape to (B, S) - assume square batch
+            total_len = target.size(0)
+            batch_size = int(total_len ** 0.5)
+            if batch_size * batch_size == total_len:
+                target = target.view(batch_size, batch_size)
             else:
-                actual_model_count = 1
+                raise ValueError(f"Cannot reshape target with size {total_len} to (B, S)")
         
-        # Reshape target: (B, S) -> (B*S) and repeat for actual models
-        if target.dim() == 2:
-            batch_size, seq_len = target.size()
-            target = target.unsqueeze(1).expand(-1, actual_model_count, -1).reshape(-1)
-        elif target.dim() == 1:
-            target = target.repeat(actual_model_count)
-            
-        # Ignore pad tokens for loss calculation
-        mask = target != self.pad_token_id
-        filtered_logits = logits[mask]
-        filtered_target = target[mask]
-        
-        loss = torch.nn.functional.cross_entropy(filtered_logits, filtered_target, reduction='none')
-        
-        # For simplicity, let's compute loss per model
+        # Compute loss per model separately (avoids partitioning bug)
         losses = []
-        mask_reshaped = mask.view(-1, actual_model_count)  # (total_tokens, actual_model_count)
-        loss_idx = 0
+        for model_idx in range(model_count):
+            # Get logits and target for this model
+            model_logits = logits[:, model_idx, :, :]  # (B, S, V)
+            model_target = target  # (B, S) - same for all models
+            
+            # Create mask for valid (non-padded) tokens
+            mask = model_target != self.pad_token_id  # (B, S)
+            
+            if mask.sum() == 0:
+                # No valid tokens
+                losses.append(torch.tensor(0.0, device=logits.device))
+                continue
+                
+            # Flatten and filter
+            flat_logits = model_logits.view(-1, vocab_size)  # (B*S, V)
+            flat_target = model_target.view(-1)  # (B*S,)
+            flat_mask = mask.view(-1)  # (B*S,)
+            
+            # Apply mask
+            filtered_logits = flat_logits[flat_mask]  # (valid_tokens, V)
+            filtered_target = flat_target[flat_mask]  # (valid_tokens,)
+            
+            # Compute cross entropy for this model
+            model_loss = torch.nn.functional.cross_entropy(
+                filtered_logits, filtered_target, reduction='mean'
+            )
+            losses.append(model_loss)
         
-        for model_idx in range(actual_model_count):
-            model_mask = mask_reshaped[:, model_idx]
-            model_valid_count = model_mask.sum().item()
-            if model_valid_count > 0:
-                model_loss = loss[loss_idx:loss_idx + model_valid_count].mean()
-                losses.append(model_loss)
-                loss_idx += model_valid_count
-            else:
-                losses.append(torch.tensor(0.0, device=loss.device))
-        
-        return torch.stack(losses)
+        return torch.stack(losses)  # (model_count,)
 
     def calculate_exact_match(self, target: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """Calculate exact match - 1 if answer portion after separator is correct, 0 otherwise."""
@@ -1344,13 +1348,6 @@ class TransformerModels(nn.Module):
                 else:
                     param_flatten[i, p_i] -= self.radius
                 self.curr_idx += 1
-                
-                if self.curr_idx >= len(self.basis_list):
-                    print("went over everything")
-                    random.shuffle(self.basis_list)
-                    self.radius /= 2
-                    self.curr_idx = 0
-                    break
             
             # Forward pass and evaluate all models
             logits = self(x, position_ids=None)  # (batch_size, model_count, seq_len, vocab_size)
@@ -1358,9 +1355,11 @@ class TransformerModels(nn.Module):
             
             # LeNet approach #5: Simple success detection (best_idx != 0)
             best_idx = losses.argmin()
+            print(f"best loss at step {losses.min():.4f} (model {best_idx})")
             
             # Copy best model to position 0
             if best_idx != 0:
+                print(f"Pattern search: improvement found, copying model {best_idx} to model 0")
                 for param in self.parameters():
                     if param.dim() >= 2 and param.size(0) == self.model_count:
                         param_reshaped = param.data.view(self.model_count, -1)
