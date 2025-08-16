@@ -331,7 +331,7 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
                 print(f"Epoch {epoch:3d} | Train: loss={train_loss.mean():.3f}, acc={train_acc.mean():.3f}, em={train_em.mean():.3f} | "
                       f"Val: loss={val_loss.mean():.3f}, acc={val_acc.mean():.3f}, em={val_em.mean():.3f}")
                 # Early stopping based on validation accuracy
-                if val_acc.mean() > es_acc:
+                if val_acc.mean() >= es_acc:
                     print(f"Early stopping at epoch {epoch}")
                     break
     
@@ -406,7 +406,7 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
                   f"Test: acc={test_acc.mean():.3f}, em={test_em.mean():.3f}")
             
             # Early stopping based on validation accuracy  
-            if val_acc.mean() > es_acc:
+            if val_acc.mean() >= es_acc:
                 print(f"Early stopping at epoch {epoch}")
                 break
     
