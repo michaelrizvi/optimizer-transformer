@@ -30,7 +30,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Section("experiment", "General experiment parameters").params(
     num_runs=Param(int, default=5, desc="Number of experimental runs"),
     device=Param(str, default="cpu", desc="Device to use (cpu/cuda)"),
-    seed=Param(int, default=42, desc="Random seed for reproducibility")
+    seed=Param(int, default=42, desc="Random seed for reproducibility"),
+    save_model=Param(bool, default=False, desc="Save trained models after training"),
+    save_dir=Param(str, default="saved_models", desc="Directory to save trained models")
 )
 
 Section("wandb", "Weights & Biases logging parameters").params(
@@ -443,12 +445,21 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
 @param('num_runs')
 @param('device')
 @param('seed')
-def run_experiment(num_runs, device, seed):
+@param('save_model')
+@param('save_dir')
+def run_experiment(num_runs, device, seed, save_model, save_dir):
     """Run the length generalization experiment for num_runs."""
     
     print("=" * 80)
     print("LENGTH GENERALIZATION EXPERIMENT")
     print("=" * 80)
+    
+    # Log model saving configuration
+    if save_model:
+        print(f"Model saving: ENABLED (directory: {save_dir})")
+        os.makedirs(save_dir, exist_ok=True)  # Create directory early to catch permission issues
+    else:
+        print("Model saving: DISABLED")
     
     # Set random seeds for reproducibility
     torch.manual_seed(seed)
@@ -556,6 +567,23 @@ def run_experiment(num_runs, device, seed):
                 wandb.finish()
             
             all_results.append(results)
+            
+            # Save model if requested
+            if save_model:
+                # Create save directory if it doesn't exist
+                os.makedirs(save_dir, exist_ok=True)
+                
+                # Create descriptive filename
+                config = get_current_config()
+                optimizer_name = config['optimizer.name']
+                train_range = f"{config['dataset.train_min_range']}-{config['dataset.train_max_range']}"
+                test_range = f"{config['dataset.test_min_range']}-{config['dataset.test_max_range']}"
+                filename = f"{optimizer_name}_run{run+1}_train{train_range}_test{test_range}.pt"
+                filepath = os.path.join(save_dir, filename)
+                
+                # Save the trained model
+                torch.save(trained_model.state_dict(), filepath)
+                print(f"  Model saved to: {filepath}")
             
             print(f"  Train: acc={results['train_acc']:.3f}, em={results['train_em']:.3f}")
             print(f"  Val:   acc={results['val_acc']:.3f}, em={results['val_em']:.3f}")

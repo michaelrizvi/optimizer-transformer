@@ -1504,18 +1504,28 @@ class TransformerModels(nn.Module):
             logits = self(x, position_ids=None, position_offset=position_offset)  # (batch_size, model_count, seq_len, vocab_size)
             losses = self.loss_function(y, logits)  # (model_count,)
             
-            # LeNet approach #5: Simple success detection (best_idx != 0)
+            # Find best model and compare with original (model 0)
             best_idx = losses.argmin()
-            print(f"best loss at step {losses.min():.4f} (model {best_idx})")
+            original_loss = losses[0]  # Loss of model 0 (original)
+            best_loss = losses[best_idx]
             
-            # Copy best model to position 0
-            print(f"Pattern search: improvement found, copying model {best_idx} to model 0")
-            for param in self.parameters():
-                if param.dim() >= 2 and param.size(0) == self.model_count:
-                    param_reshaped = param.data.view(self.model_count, -1)
-                    param_reshaped[:] = param_reshaped[best_idx:best_idx+1].clone()
-            if best_idx != 0:
+            print(f"Model 0 loss: {original_loss:.4f}, best loss: {best_loss:.4f} (model {best_idx})")
+            
+            # Only update if we found actual improvement
+            if best_loss < original_loss and best_idx != 0:
+                print(f"Pattern search: improvement found! Copying model {best_idx} to model 0")
+                # Copy ONLY the best model to model 0, not to all models
+                for param in self.parameters():
+                    if param.dim() >= 2 and param.size(0) == self.model_count:
+                        param_reshaped = param.data.view(self.model_count, -1)
+                        param_reshaped[0] = param_reshaped[best_idx].clone()  # Copy only to model 0
                 break  # Found improvement, exit
+            elif best_idx == 0:
+                print("Model 0 is already best, continuing search...")
+                # Continue searching - model 0 is already optimal among current perturbations
+            else:
+                print("No improvement found in this iteration, continuing search...")
+                # Continue searching - no perturbation improved upon model 0
     
     def _copy_model_0_to_all(self):
         """Copy model 0 parameters to all other models (LeNet pattern)."""
