@@ -1476,6 +1476,10 @@ class TransformerModels(nn.Module):
             print(f"Created basis list with {len(self.basis_list)} elements")
         
         random.shuffle(self.basis_list)
+        
+        # CRITICAL FIX: Reset curr_idx at the beginning of each pattern_search call
+        # This ensures each call starts from the beginning of the basis_list,
+        # preventing state corruption between consecutive pattern_search calls
         self.curr_idx = 0
         
         # LeNet approach #2: No best_loss initialization - use immediate comparison
@@ -1522,19 +1526,6 @@ class TransformerModels(nn.Module):
                     if param.dim() >= 2 and param.size(0) == self.model_count:
                         param_reshaped = param.data.view(self.model_count, -1)
                         param_reshaped[0] = param_reshaped[best_idx].clone()  # Copy only to model 0
-                
-                # DIAGNOSTIC: Verify the copy worked by re-evaluating
-                logits_verify = self(x, position_ids=None, position_offset=position_offset)
-                losses_verify = self.loss_function(y, logits_verify)
-                new_model_0_loss = losses_verify[0]
-                print(f"DIAGNOSTIC: Expected model 0 loss after copy: {best_loss:.4f}")
-                print(f"DIAGNOSTIC: Actual model 0 loss after copy: {new_model_0_loss:.4f}")
-                print(f"DIAGNOSTIC: Difference: {abs(new_model_0_loss - best_loss):.8f}")
-                if abs(new_model_0_loss - best_loss) > 1e-6:
-                    print("❌ DIAGNOSTIC: Parameter copy verification FAILED!")
-                else:
-                    print("✅ DIAGNOSTIC: Parameter copy verification PASSED")
-                
                 break  # Found improvement, exit
             elif best_idx == 0:
                 print("Model 0 is already best, continuing search...")
