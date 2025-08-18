@@ -1509,6 +1509,7 @@ class TransformerModels(nn.Module):
             print(f"best loss at step {losses.min():.4f} (model {best_idx})")
             
             # Copy best model to position 0
+            print(f"Pattern search: improvement found, copying model {best_idx} to model 0")
             for param in self.parameters():
                 if param.dim() >= 2 and param.size(0) == self.model_count:
                     param_reshaped = param.data.view(self.model_count, -1)

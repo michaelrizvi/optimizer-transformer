@@ -91,7 +91,11 @@ Section("optimizer", "Training parameters").params(
     max_position_offset=Param(int, default=16, desc="Maximum position offset"),
     
     # Evaluation parameters
-    eval_frequency=Param(int, default=10, desc="Evaluate every N epochs")
+    eval_frequency=Param(int, default=10, desc="Evaluate every N epochs"),
+    
+    # Cosine radius scheduler parameters
+    use_cosine_radius_scheduler=Param(bool, default=False, desc="Use cosine scheduler for radius perturbation"),
+    cosine_period=Param(int, default=100, desc="Period of cosine scheduler for radius (in epochs)")
 )
 
 # ============================================================================
@@ -220,14 +224,20 @@ def create_model(d_model, n_layers, n_heads, d_ff, max_len, dropout, model_count
 @param('use_position_offsets')
 @param('max_position_offset')
 @param('eval_frequency')
+@param('use_cosine_radius_scheduler')
+@param('cosine_period')
 def train(train_data, val_data, test_data, model, name, lr, momentum, batch_size, epochs, 
-          es_acc, use_position_offsets, max_position_offset, eval_frequency):
+          es_acc, use_position_offsets, max_position_offset, eval_frequency,
+          use_cosine_radius_scheduler, cosine_period):
     """Train the model using specified optimizer."""
     
     print(f"\nStarting training with {name}")
     print(f"  Position offsets: {use_position_offsets}")
     if use_position_offsets:
         print(f"  Max offset: {max_position_offset}")
+    print(f"  Cosine radius scheduler: {use_cosine_radius_scheduler}")
+    if use_cosine_radius_scheduler:
+        print(f"  Cosine period: {cosine_period} epochs")
     
     # Move data to device
     device = next(model.parameters()).device
@@ -260,7 +270,9 @@ def train(train_data, val_data, test_data, model, name, lr, momentum, batch_size
             es_acc=es_acc,
             use_position_offsets=use_position_offsets,
             max_position_offset=max_position_offset,
-            eval_frequency=eval_frequency
+            eval_frequency=eval_frequency,
+            use_cosine_radius_scheduler=use_cosine_radius_scheduler,
+            cosine_period=cosine_period
         )
     else:
         raise ValueError(f"Unknown optimizer: {name}")
@@ -339,13 +351,18 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
 
 @torch.no_grad()
 def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc, 
-                        use_position_offsets, max_position_offset, eval_frequency):
+                        use_position_offsets, max_position_offset, eval_frequency,
+                        use_cosine_radius_scheduler, cosine_period):
     """Pattern search training with early stopping on validation set."""
     from utils import sample_position_offset
+    import math
     
     best_val_acc = 0.0
     epochs_without_improvement = 0
     patience = 20
+    
+    # Store initial radius for cosine scheduler
+    initial_radius = model.radius
     
     for epoch in range(epochs):
         # Pattern search step
@@ -409,6 +426,12 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
             if val_acc.mean() >= es_acc:
                 print(f"Early stopping at epoch {epoch}")
                 break
+        
+        # Update radius with cosine scheduler at the end of every epoch
+        if use_cosine_radius_scheduler:
+            # Cosine decay schedule: starts at initial_radius, goes to 0, then back up
+            cosine_factor = 0.5 * (1 + math.cos(math.pi * (epoch % cosine_period) / cosine_period))
+            model.radius = initial_radius * cosine_factor
     
     return model.get_model_subsets([0]).to(next(model.parameters()).device)
 
