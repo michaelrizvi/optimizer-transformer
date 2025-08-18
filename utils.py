@@ -1457,11 +1457,6 @@ class TransformerModels(nn.Module):
         x = data[:, :-1]
         y = data[:, 1:]
         
-        # Sample random position offset if not provided
-        if position_offset is None:
-            max_offset = max(0, self.max_len - data.size(1))  # Maximum valid offset for this sequence length
-            position_offset = sample_position_offset(max_offset, x.size(1), self.max_len)
-        
         # Initialize basis list if not already done (LeNet approach #1)
         if self.basis_list is None:
             self.basis_list = []
@@ -1485,11 +1480,13 @@ class TransformerModels(nn.Module):
         # LeNet approach #2: No best_loss initialization - use immediate comparison
         # LeNet approach #3: Simple while loop
         while True:
-            # Copy model 0 to all other models (replicate first model)
+            #logits = self(x, position_ids=None, position_offset=position_offset)  # (batch_size, model_count, seq_len, vocab_size)
+            #losses = self.loss_function(y, logits)  # (model_count,)
+            #print("Loss of model 0 at beginning of loop:", losses[0])
             for param in self.parameters():
                 if param.dim() >= 2 and param.size(0) == self.model_count:
                     param_reshaped = param.data.view(self.model_count, -1)
-                    param_reshaped[1:] = param_reshaped[0:1]
+                    param_reshaped[1:] = param_reshaped[0:1].clone()
             
             # LeNet approach #4: Apply perturbations to each model sequentially
             for i in range(1, self.model_count):
@@ -1516,16 +1513,16 @@ class TransformerModels(nn.Module):
             original_loss = losses[0]  # Loss of model 0 (original)
             best_loss = losses[best_idx]
             
-            print(f"Model 0 loss: {original_loss:.4f}, best loss: {best_loss:.4f} (model {best_idx})")
+            print(f"Model 0 loss: {original_loss:.4f}), best loss: {best_loss:.4f} (model {best_idx})")
             
             # Only update if we found actual improvement
-            if best_loss < original_loss and best_idx != 0:
+            if best_idx != 0 and best_loss < original_loss:
                 print(f"Pattern search: improvement found! Copying model {best_idx} to model 0")
                 # Copy ONLY the best model to model 0, not to all models
                 for param in self.parameters():
                     if param.dim() >= 2 and param.size(0) == self.model_count:
                         param_reshaped = param.data.view(self.model_count, -1)
-                        param_reshaped[0] = param_reshaped[best_idx].clone()  # Copy only to model 0
+                        param_reshaped[0] = param_reshaped[best_idx].clone() # Copy only to model 0
                 break  # Found improvement, exit
             elif best_idx == 0:
                 print("Model 0 is already best, continuing search...")

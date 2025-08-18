@@ -47,21 +47,21 @@ Section("wandb", "Weights & Biases logging parameters").params(
 Section("dataset", "CountSequenceDataset parameters").params(
     # Training data length range
     train_min_range=Param(int, default=1, desc="Minimum sequence length for training"),
-    train_max_range=Param(int, default=10, desc="Maximum sequence length for training"), 
+    train_max_range=Param(int, default=8, desc="Maximum sequence length for training"), 
     
     # Test/validation data length range
-    test_min_range=Param(int, default=11, desc="Minimum sequence length for test/validation"),
-    test_max_range=Param(int, default=15, desc="Maximum sequence length for test/validation"),
+    test_min_range=Param(int, default=9, desc="Minimum sequence length for test/validation"),
+    test_max_range=Param(int, default=16, desc="Maximum sequence length for test/validation"),
     
     # Dataset size parameters
-    train_samples=Param(int, default=2000, desc="Number of training samples"),
-    val_samples=Param(int, default=500, desc="Number of validation samples"),
-    test_samples=Param(int, default=500, desc="Number of test samples"),
+    train_samples=Param(int, default=500, desc="Number of training samples"),
+    val_samples=Param(int, default=200, desc="Number of validation samples"),
+    test_samples=Param(int, default=200, desc="Number of test samples"),
     
     # Vocabulary parameters
-    vocab_size=Param(int, default=110, desc="Vocabulary size"),  # Increased to accommodate sep/pad tokens
-    sep_token=Param(int, default=102, desc="Separator token ID"),
-    pad_token=Param(int, default=103, desc="Padding token ID"),
+    vocab_size=Param(int, default=32, desc="Vocabulary size"),  # Increased to accommodate sep/pad tokens
+    sep_token=Param(int, default=30, desc="Separator token ID"),
+    pad_token=Param(int, default=31, desc="Padding token ID"),
     max_length=Param(int, default=32, desc="Maximum sequence length (for padding)")
 )
 
@@ -69,7 +69,7 @@ Section("model", "TransformerModels parameters").params(
     d_model=Param(int, default=32, desc="Model dimension"),
     n_layers=Param(int, default=2, desc="Number of transformer layers"),
     n_heads=Param(int, default=4, desc="Number of attention heads"),
-    d_ff=Param(int, default=128, desc="Feed-forward dimension"),
+    d_ff=Param(int, default=64, desc="Feed-forward dimension"),
     max_len=Param(int, default=64, desc="Maximum position encoding length"),
     dropout=Param(float, default=0.0, desc="Dropout probability"),
     model_count=Param(int, default=16, desc="Number of parallel models for pattern search"),
@@ -234,9 +234,6 @@ def train(train_data, val_data, test_data, model, name, lr, momentum, batch_size
     """Train the model using specified optimizer."""
     
     print(f"\nStarting training with {name}")
-    print(f"  Position offsets: {use_position_offsets}")
-    if use_position_offsets:
-        print(f"  Max offset: {max_position_offset}")
     print(f"  Cosine radius scheduler: {use_cosine_radius_scheduler}")
     if use_cosine_radius_scheduler:
         print(f"  Cosine period: {cosine_period} epochs")
@@ -368,25 +365,14 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
     
     for epoch in range(epochs):
         # Pattern search step
-        if use_position_offsets:
-            max_offset = min(max_position_offset, model.max_len - train_data.size(1))
-            position_offset = sample_position_offset(max_offset, train_data.size(1) - 1, model.max_len)
-            model.pattern_search(train_data, None, None, position_offset=position_offset)
-        else:
-            model.pattern_search(train_data, None, None)
+        model.pattern_search(train_data, None, None)
         
         # Evaluation
         if epoch % eval_frequency == 0:
-            if use_position_offsets:
-                # Multi-offset evaluation
-                train_loss, train_acc = evaluate_with_offsets(train_data, None, model, None, num_offset_tests=3)
-                val_loss, val_acc = evaluate_with_offsets(val_data, None, model, None, num_offset_tests=3)
-                test_loss, test_acc = evaluate_with_offsets(test_data, None, model, None, num_offset_tests=3)
-            else:
-                # Standard evaluation
-                train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, model, None)
-                val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, model, None)
-                test_loss, test_acc = calculate_transformer_loss_acc(test_data, None, model, None)
+            # Standard evaluation
+            train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, model, None)
+            val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, model, None)
+            test_loss, test_acc = calculate_transformer_loss_acc(test_data, None, model, None)
             
             # Calculate exact match
             train_em = calculate_transformer_exactmatch(train_data, None, model, None)
@@ -406,18 +392,11 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
                     "test/exact_match": test_em.mean().item(),
                 }
                 # Add loss metrics if available
-                if use_position_offsets:
-                    metrics.update({
-                        "train/loss": train_loss.mean().item(),
-                        "val/loss": val_loss.mean().item(),
-                        "test/loss": test_loss.mean().item()
-                    })
-                else:
-                    metrics.update({
-                        "train/loss": train_loss.mean().item(),
-                        "val/loss": val_loss.mean().item(),
-                        "test/loss": test_loss.mean().item()
-                    })
+                metrics.update({
+                    "train/loss": train_loss.mean().item(),
+                    "val/loss": val_loss.mean().item(),
+                    "test/loss": test_loss.mean().item()
+                })
                 wandb.log(metrics)
             
             print(f"Epoch {epoch:3d} | Train: acc={train_acc.mean():.3f}, em={train_em.mean():.3f} | "
@@ -527,14 +506,9 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
             test_data = test_data.to(model_device)
             
             config = get_current_config()
-            if config['optimizer.use_position_offsets']:
-                train_loss, train_acc = evaluate_with_offsets(train_data, None, trained_model, None, num_offset_tests=5)
-                val_loss, val_acc = evaluate_with_offsets(val_data, None, trained_model, None, num_offset_tests=5)
-                test_loss, test_acc = evaluate_with_offsets(test_data, None, trained_model, None, num_offset_tests=5)
-            else:
-                train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, trained_model, None)
-                val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, trained_model, None)
-                test_loss, test_acc = calculate_transformer_loss_acc(test_data, None, trained_model, None)
+            train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, trained_model, None)
+            val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, trained_model, None)
+            test_loss, test_acc = calculate_transformer_loss_acc(test_data, None, trained_model, None)
             
             train_em = calculate_transformer_exactmatch(train_data, None, trained_model, None)
             val_em = calculate_transformer_exactmatch(val_data, None, trained_model, None)
