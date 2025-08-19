@@ -9,7 +9,7 @@ import os
 import argparse
 import random
 import numpy as np
-from utils import TransformerModels, calculate_transformer_loss_acc, calculate_transformer_exactmatch, evaluate_with_offsets
+from utils import TransformerModels, calculate_transformer_metrics
 from datasets import CountSequenceDataset
 from fastargs import Section, Param, get_current_config
 from fastargs.validation import OneOf
@@ -185,12 +185,13 @@ def create_datasets(train_min_range, train_max_range, test_min_range, test_max_r
 @param('max_len')
 @param('dropout')
 @param('model_count')
+@param('init')
 @section('dataset')
 @param('vocab_size')
 @param('sep_token')
 @param('pad_token')
 def create_model(d_model, n_layers, n_heads, d_ff, max_len, dropout, model_count,
-                vocab_size, sep_token, pad_token, device):
+                vocab_size, sep_token, pad_token, device, init):
     """Create a TransformerModels instance."""
     
     model = TransformerModels(
@@ -204,7 +205,8 @@ def create_model(d_model, n_layers, n_heads, d_ff, max_len, dropout, model_count
         device=torch.device(device),
         dropout=dropout,
         sep_token_id=sep_token,
-        pad_token_id=pad_token
+        pad_token_id=pad_token,
+        init=init
     )
     
     print(f"Created model: d_model={d_model}, n_layers={n_layers}, n_heads={n_heads}")
@@ -294,16 +296,10 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
         for st_idx in range(0, len(train_data), batch_size):
             idx = idx_list[st_idx:min(st_idx + batch_size, len(train_data))]
             
-            if use_position_offsets:
-                # Sample random position offset for this batch
-                max_offset = min(max_position_offset, model.max_len - train_data.size(1))
-                position_offset = sample_position_offset(max_offset, train_data.size(1) - 1, model.max_len)
-                train_loss, train_acc = calculate_loss_acc_with_offset(train_data[idx], None, model, None, position_offset)
-            else:
-                train_loss, train_acc = calculate_transformer_loss_acc(train_data[idx], None, model, None)
+            train_loss, train_acc, _ = calculate_transformer_metrics(train_data[idx], None, model, None)
             
             optimizer.zero_grad()
-            train_loss.sum().backward()
+            train_loss.backward()
             optimizer.step()
         
         scheduler.step()
@@ -312,35 +308,28 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
         if epoch % eval_frequency == 0:
             model.eval()
             with torch.no_grad():
-                if use_position_offsets:
-                    # Multi-offset evaluation
-                    train_loss, train_acc = evaluate_with_offsets(train_data, None, model, None, num_offset_tests=3)
-                    val_loss, val_acc = evaluate_with_offsets(val_data, None, model, None, num_offset_tests=3)
-                else:
-                    # Standard evaluation
-                    train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, model, None)
-                    val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, model, None)
-                
-                # Calculate exact match
-                train_em = calculate_transformer_exactmatch(train_data, None, model, None)
-                val_em = calculate_transformer_exactmatch(val_data, None, model, None)
+                # Standard evaluation
+                train_loss, train_acc, train_em = calculate_transformer_metrics(train_data, None, model, None)
+                val_loss, val_acc, val_em = calculate_transformer_metrics(val_data, None, model, None)
                 
                 # Wandb logging
                 config = get_current_config()
                 if WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_during_training'] and not config['wandb.log_final_only']:
                     wandb.log({
                         "epoch": epoch,
-                        "train/loss": train_loss.mean().item(),
-                        "train/accuracy": train_acc.mean().item(),
-                        "train/exact_match": train_em.mean().item(),
-                        "val/loss": val_loss.mean().item(),
-                        "val/accuracy": val_acc.mean().item(),
-                        "val/exact_match": val_em.mean().item(),
+                        "train/loss": train_loss.item(),
+                        "train/accuracy": train_acc.item(),
+                        "train/exact_match": train_em.item(),
+                        "val/loss": val_loss.item(),
+                        "val/accuracy": val_acc.item(),
+                        "val/exact_match": val_em.item(),
                         "learning_rate": scheduler.get_last_lr()[0]
                     })
                 
-                print(f"Epoch {epoch:3d} | Train: loss={train_loss.mean():.3f}, acc={train_acc.mean():.3f}, em={train_em.mean():.3f} | "
-                      f"Val: loss={val_loss.mean():.3f}, acc={val_acc.mean():.3f}, em={val_em.mean():.3f}")
+                print(f"Epoch {epoch:3d} | Train: acc={train_acc.item():.3f}, em={train_em.item():.3f}, loss={train_loss.item():.3f} | \n"
+                    f"Val: acc={val_acc.item():.3f}, em={val_em.item():.3f}, loss={val_loss.item():.3f} | "
+                    )
+
                 # Early stopping based on validation accuracy
                 if val_acc.mean() >= es_acc:
                     print(f"Early stopping at epoch {epoch}")
@@ -353,12 +342,7 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
                         use_position_offsets, max_position_offset, eval_frequency,
                         use_cosine_radius_scheduler, cosine_period):
     """Pattern search training with early stopping on validation set."""
-    from utils import sample_position_offset
     import math
-    
-    best_val_acc = 0.0
-    epochs_without_improvement = 0
-    patience = 20
     
     # Store initial radius for cosine scheduler
     initial_radius = model.radius
@@ -370,41 +354,32 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
         # Evaluation
         if epoch % eval_frequency == 0:
             # Standard evaluation
-            train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, model, None)
-            val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, model, None)
-            test_loss, test_acc = calculate_transformer_loss_acc(test_data, None, model, None)
-            
-            # Calculate exact match
-            train_em = calculate_transformer_exactmatch(train_data, None, model, None)
-            val_em = calculate_transformer_exactmatch(val_data, None, model, None)
-            test_em = calculate_transformer_exactmatch(test_data, None, model, None)
+            train_loss, train_acc, train_em = calculate_transformer_metrics(train_data, None, model, None)
+            val_loss, val_acc, val_em = calculate_transformer_metrics(val_data, None, model, None)
             
             # Wandb logging
             config = get_current_config()
             if WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_during_training'] and not config['wandb.log_final_only']:
                 metrics = {
                     "epoch": epoch,
-                    "train/accuracy": train_acc.mean().item(),
-                    "train/exact_match": train_em.mean().item(),
-                    "val/accuracy": val_acc.mean().item(),
-                    "val/exact_match": val_em.mean().item(),
-                    "test/accuracy": test_acc.mean().item(),
-                    "test/exact_match": test_em.mean().item(),
+                    "train/accuracy": train_acc.item(),
+                    "train/exact_match": train_em.item(),
+                    "val/accuracy": val_acc.item(),
+                    "val/exact_match": val_em.item(),
                 }
                 # Add loss metrics if available
                 metrics.update({
-                    "train/loss": train_loss.mean().item(),
-                    "val/loss": val_loss.mean().item(),
-                    "test/loss": test_loss.mean().item()
+                    "train/loss": train_loss.item(),
+                    "val/loss": val_loss.item(),
                 })
                 wandb.log(metrics)
-            
-            print(f"Epoch {epoch:3d} | Train: acc={train_acc.mean():.3f}, em={train_em.mean():.3f} | "
-                  f"Val: acc={val_acc.mean():.3f}, em={val_em.mean():.3f} | "
-                  f"Test: acc={test_acc.mean():.3f}, em={test_em.mean():.3f}")
+
+            print(f"Epoch {epoch:3d} | Train: acc={train_acc.item():.3f}, em={train_em.item():.3f}, loss={train_loss.item():.3f} | \n"
+                f"Val: acc={val_acc.item():.3f}, em={val_em.item():.3f}, loss={val_loss.item():.3f} | "
+                )
             
             # Early stopping based on validation accuracy  
-            if val_acc.mean() >= es_acc:
+            if val_acc.item() >= es_acc:
                 print(f"Early stopping at epoch {epoch}")
                 break
         
@@ -506,13 +481,9 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
             test_data = test_data.to(model_device)
             
             config = get_current_config()
-            train_loss, train_acc = calculate_transformer_loss_acc(train_data, None, trained_model, None)
-            val_loss, val_acc = calculate_transformer_loss_acc(val_data, None, trained_model, None)
-            test_loss, test_acc = calculate_transformer_loss_acc(test_data, None, trained_model, None)
-            
-            train_em = calculate_transformer_exactmatch(train_data, None, trained_model, None)
-            val_em = calculate_transformer_exactmatch(val_data, None, trained_model, None)
-            test_em = calculate_transformer_exactmatch(test_data, None, trained_model, None)
+            train_loss, train_acc, train_em = calculate_transformer_metrics(train_data, None, trained_model, None)
+            val_loss, val_acc, val_em = calculate_transformer_metrics(val_data, None, trained_model, None)
+            test_loss, test_acc, test_em= calculate_transformer_metrics(test_data, None, trained_model, None)
             
             results = {
                 'run': run + 1,

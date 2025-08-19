@@ -158,7 +158,7 @@ def calculate_loss_acc_vanilla(data, labels, model, loss_func, batch_size=None):
     return loss, acc
 
 
-def calculate_transformer_loss_acc(data, labels, model, loss_func, batch_size=None):
+def calculate_transformer_metrics(data, labels, model, loss_func, batch_size=None):
     """
     Calculate loss and accuracy for transformer models on counting task.
     For counting task, 'data' contains the full sequences and 'labels' is ignored.
@@ -171,12 +171,18 @@ def calculate_transformer_loss_acc(data, labels, model, loss_func, batch_size=No
         logits = model(x)  # (batch_size, model_count, seq_len, vocab_size)
         
         # Use model's loss function which handles padding
-        loss = model.loss_function(y, logits)  # (model_count,)
-        
+        losses = model.loss_function(y, logits)  # (model_count,)
+        best_idx = losses.argmin()
+        loss = losses[best_idx] 
+        best_logits = logits[:,best_idx]
+        best_logits = best_logits.unsqueeze(1)
         # Calculate token-wise accuracy on answer portion only
-        acc = calculate_counting_accuracy(y, logits, model.sep_token_id, model.pad_token_id)
-        
-        return loss, acc
+        acc = calculate_counting_accuracy(y, best_logits, model.sep_token_id, model.pad_token_id)
+        em = calculate_exact_match_accuracy(y, best_logits, model.sep_token_id, model.pad_token_id)
+
+        # WE RETURN THE WHOLE LOSS VECTOR OVER MODELS
+        # WE SHOULD RETURN ONLY LOSS of best model and only logits of best model
+        return loss, acc, em 
     else:
         # Batched processing
         all_losses = []
@@ -984,7 +990,7 @@ class LinearModels(nn.Module):
 
 
 class TransformerModels(nn.Module):
-    def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103):
+    def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103, init='regular'):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
@@ -1047,7 +1053,13 @@ class TransformerModels(nn.Module):
         self.radius = 1 
         
         # Initialize parameters
-        self._init_vectorized_params()
+        if init == 'regular':
+            self._init_vectorized_params()
+        elif init == 'uniform':
+            self.reinitialize()
+        else:
+            # cast an error or smth
+            raise ValueError(f"Unknown initialization method: {init}")
 
     def _init_vectorized_params(self):
         """Initialize parameters using Xavier/Kaiming initialization."""
@@ -1294,18 +1306,8 @@ class TransformerModels(nn.Module):
         token_emb = self.vectorized_token_embedding(x)  # (batch_size, model_count, seq_len, d_model)
         
         # Position embeddings with optional offset
-        if position_ids is not None:
-            pos_emb = self.vectorized_position_embedding(position_ids)
-        elif position_offset is not None:
-            # Apply positional offset: use positions [offset, offset+1, ..., offset+seq_len-1]
-            if position_offset + seq_len > self.max_len:
-                raise ValueError(f"position_offset ({position_offset}) + seq_len ({seq_len}) exceeds max_len ({self.max_len})")
-            
-            # Use consistent indexing approach: slice the position embeddings directly
-            pos_emb = self.pos_emb[:, position_offset:position_offset + seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
-        else:
-            # Original default behavior: use positions [0, 1, 2, ..., seq_len-1]
-            pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
+        # Original default behavior: use positions [0, 1, 2, ..., seq_len-1]
+        pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
         
         # Add embeddings
         hidden = token_emb + pos_emb  # (batch_size, model_count, seq_len, d_model)
@@ -1451,7 +1453,7 @@ class TransformerModels(nn.Module):
         import random
         
         # Ensure model is in eval mode for consistent loss computation
-        self.eval()
+        #self.eval()
         
         # Create x and y for next-token prediction
         x = data[:, :-1]

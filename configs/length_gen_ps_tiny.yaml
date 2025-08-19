@@ -1,7 +1,7 @@
 experiment:
   num_runs: 1
   device: cuda
-  seed: 42
+  seed: 43
 
 wandb:
   enabled: true 
@@ -14,11 +14,11 @@ wandb:
 dataset:
   # Training data - shorter sequences (1-10)
   train_min_range: 1
-  train_max_range: 8 
+  train_max_range: 5 
   
   # Test/validation data - longer sequences (11-15)
-  test_min_range: 9 
-  test_max_range: 16
+  test_min_range: 6 
+  test_max_range: 10
   
   # Dataset sizes
   train_samples: 500 
@@ -26,26 +26,31 @@ dataset:
   test_samples: 200
   
   # Vocabulary parameters
-  vocab_size: 32 
-  sep_token: 30 
-  pad_token: 31 
+  vocab_size: 110
+  sep_token: 102
+  pad_token: 103
   max_length: 32
 
 model:
   d_model: 32
   n_layers: 2
   n_heads: 4
-  d_ff: 64  # Smaller for pattern search as in original config
+  d_ff: 128  # Smaller for pattern search as in original config
   max_len: 64
   dropout: 0.0  # No dropout for pattern search
-  model_count: 128  # Smaller model count for faster experimentation
+  model_count: 8  # Smaller model count for faster experimentation
   init: regular
 
 optimizer:
   name: PatternSearchFast
+  
   # Training parameters
-  epochs: 30000  # Reduced from 10000 for faster experiments
-  es_acc: 0.99
+  epochs: 80000  
+  es_acc: 0.95
+  
+  # Position offset parameters (disabled by default)
+  use_position_offsets: false
+  max_position_offset: 16
   
   # Evaluation parameters
-  eval_frequency: 100
+  eval_frequency: 50
