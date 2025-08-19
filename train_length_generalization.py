@@ -348,12 +348,14 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
     initial_radius = model.radius
     
     for epoch in range(epochs):
+        model.train()
         # Pattern search step
         model.pattern_search(train_data, None, None)
         
         # Evaluation
         if epoch % eval_frequency == 0:
             # Standard evaluation
+            model.eval
             train_loss, train_acc, train_em = calculate_transformer_metrics(train_data, None, model, None)
             val_loss, val_acc, val_em = calculate_transformer_metrics(val_data, None, model, None)
             

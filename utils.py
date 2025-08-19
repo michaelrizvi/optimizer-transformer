@@ -1452,9 +1452,6 @@ class TransformerModels(nn.Module):
         """Pattern search following LeNet approach - adapted for TransformerModels."""
         import random
         
-        # Ensure model is in eval mode for consistent loss computation
-        #self.eval()
-        
         # Create x and y for next-token prediction
         x = data[:, :-1]
         y = data[:, 1:]
