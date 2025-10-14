@@ -41,7 +41,7 @@ Section("wandb", "Weights & Biases logging parameters").params(
     entity=Param(str, default=None, desc="WandB entity (username/team)"),
     offline=Param(bool, default=False, desc="Run wandb offline"),
     log_during_training=Param(bool, default=True, desc="Log metrics during training loops"),
-    log_final_only=Param(bool, default=False, desc="Only log final results, not during training")
+    log_final_only=Param(bool, default=True, desc="Only log summary results across all runs, disable intermediate and per-run logging")
 )
 
 Section("dataset", "Dataset parameters for sequence tasks").params(
@@ -337,7 +337,7 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
                 
                 # Wandb logging
                 config = get_current_config()
-                if WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_during_training'] and not config['wandb.log_final_only']:
+                if not config['wandb.log_final_only'] and WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_during_training']:
                     wandb.log({
                         "epoch": epoch,
                         "train/loss": train_loss.item(),
@@ -389,7 +389,7 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
             
             # Wandb logging
             config = get_current_config()
-            if WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_during_training'] and not config['wandb.log_final_only']:
+            if not config['wandb.log_final_only'] and WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_during_training']:
                 metrics = {
                     "epoch": epoch,
                     "train/accuracy": train_acc.item(),
@@ -458,8 +458,8 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
     for run in range(num_runs):
         print(f"\n{'='*20} RUN {run + 1}/{num_runs} {'='*20}")
         
-        # Initialize wandb for this run
-        if WANDB_AVAILABLE and config['wandb.enabled']:
+        # Initialize wandb for this run (only if not log_final_only mode)
+        if WANDB_AVAILABLE and config['wandb.enabled'] and not config['wandb.log_final_only']:
             wandb_config = vars(config.get())
             wandb_config['run_number'] = run + 1
             
@@ -523,8 +523,8 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
                 'test_em': test_em.mean().item()
             }
             
-            # Log final results to wandb
-            if WANDB_AVAILABLE and config['wandb.enabled']:
+            # Log final results to wandb (only if not log_final_only mode)
+            if WANDB_AVAILABLE and config['wandb.enabled'] and not config['wandb.log_final_only']:
                 wandb.log({
                     "final/train_accuracy": results['train_acc'],
                     "final/train_exact_match": results['train_em'],
@@ -535,8 +535,9 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
                     "final/generalization_gap_acc": results['train_acc'] - results['test_acc'],
                     "final/generalization_gap_em": results['train_em'] - results['test_em']
                 })
-                
-                # Finish this wandb run
+            
+            # Finish this wandb run (only if we initialized one)
+            if WANDB_AVAILABLE and config['wandb.enabled'] and not config['wandb.log_final_only']:
                 wandb.finish()
             
             all_results.append(results)
@@ -579,10 +580,6 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
     print(f"Val EM:         {np.mean(val_ems):.3f} ± {np.std(val_ems):.3f}")
     print(f"Test EM:        {np.mean(test_ems):.3f} ± {np.std(test_ems):.3f}")
     
-    # Length generalization analysis
-    generalization_gap_acc = np.mean(train_accs) - np.mean(test_accs)
-    generalization_gap_em = np.mean(train_ems) - np.mean(test_ems)
-    
     # Log summary to wandb
     if WANDB_AVAILABLE and config['wandb.enabled']:
         # Create a summary run
@@ -611,23 +608,10 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
             "summary/val_em_std": np.std(val_ems),
             "summary/test_em_mean": np.mean(test_ems),
             "summary/test_em_std": np.std(test_ems),
-            "summary/generalization_gap_acc": generalization_gap_acc,
-            "summary/generalization_gap_em": generalization_gap_em,
             "summary/num_runs": num_runs
         })
         
         wandb.finish()
-    
-    print(f"\nLength Generalization Analysis:")
-    print(f"  Accuracy gap (train - test): {generalization_gap_acc:+.3f}")
-    print(f"  Exact match gap (train - test): {generalization_gap_em:+.3f}")
-    
-    if generalization_gap_acc < 0.1 and generalization_gap_em < 0.1:
-        print("  ✓ Good length generalization!")
-    elif generalization_gap_acc < 0.2 and generalization_gap_em < 0.2:
-        print("  ~ Moderate length generalization")
-    else:
-        print("  ✗ Poor length generalization")
 
 def main():
     """Main function with fastargs integration."""

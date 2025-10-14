@@ -9,7 +9,7 @@ wandb:
   entity: null
   offline: false
   log_during_training: true
-  log_final_only: false
+  log_final_only: true 
 
 dataset:
   # Training data - shorter sequences (1-10)
