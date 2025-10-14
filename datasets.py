@@ -479,6 +479,13 @@ def count_fn(input_seq):
     return torch.arange(min_val, max_val + 1)
 
 
+def sort_fn(input_seq):
+    """
+    Given input sequence, return sorted sequence in ascending order
+    """
+    return torch.sort(input_seq)[0]
+
+
 class CountSequenceDataset(Dataset):
     """
     Dataset for COUNT task: given [min_val, max_val], generate sequence from min to max.
@@ -531,6 +538,139 @@ class CountSequenceDataset(Dataset):
             output_seq = count_fn(input_seq)
             
             # Create full sequence: [min_val, max_val] + [sep_token] + [output]
+            full_seq = torch.cat([
+                input_seq,
+                torch.tensor([self.sep_token]),
+                output_seq
+            ])
+            
+            self.sequences.append(full_seq)
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return self.sequences[index]
+
+
+class SortingDataset(Dataset):
+    """
+    Dataset for SORTING task: given random sequence, generate sorted sequence.
+    
+    This dataset generates sequences of the form: [input_seq] + [sep_token] + [sorted_input_seq]
+    For next-token prediction training, where the model learns to sort sequences.
+    
+    Example:
+    Input: [4, 12, 3, 7]
+    Output: [3, 4, 7, 12] 
+    Full sequence: [4, 12, 3, 7, 102, 3, 4, 7, 12]  (102 is separator '>')
+    """
+    
+    def __init__(
+        self,
+        n_samples: int = 5000,
+        min_range_size: int = 2,  # Minimum sequence length
+        max_range_size: int = 10, # Maximum sequence length
+        vocab_size: int = 20,
+        sep_token: int = 102,
+        pad_token: int = 103,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.n_samples = n_samples
+        self.min_range_size = min_range_size
+        self.max_range_size = max_range_size
+        self.vocab_size = vocab_size
+        self.sep_token = sep_token
+        self.pad_token = pad_token
+        
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+        
+        # Pregenerate all samples
+        self.sequences = []
+        for _ in range(n_samples):
+            # 1) Sample sequence length uniformly from [min_range_size, max_range_size]
+            seq_length = torch.randint(self.min_range_size, self.max_range_size + 1, (1,)).item()
+            
+            # 2) Create random input sequence of that length with values from [0, vocab_size)
+            input_seq = torch.randint(0, self.vocab_size, (seq_length,))
+            
+            # 3) Apply sort function to get output sequence
+            output_seq = sort_fn(input_seq)
+            
+            # Create full sequence: input + [sep_token] + sorted_output
+            full_seq = torch.cat([
+                input_seq,
+                torch.tensor([self.sep_token]),
+                output_seq
+            ])
+            
+            self.sequences.append(full_seq)
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return self.sequences[index]
+
+
+class CopyDataset(Dataset):
+    """
+    Dataset for COPY task: given random sequence, generate copy of the sequence.
+    
+    This dataset generates sequences of the form: [input_seq] + [sep_token] + [input_seq]
+    For next-token prediction training, where the model learns to copy sequences.
+    
+    Example:
+    Input: [4, 12, 3, 7]
+    Output: [4, 12, 3, 7] 
+    Full sequence: [4, 12, 3, 7, 102, 4, 12, 3, 7]  (102 is separator '>')
+    """
+    
+    def __init__(
+        self,
+        n_samples: int = 5000,
+        min_range_size: int = 2,  # Minimum sequence length
+        max_range_size: int = 10, # Maximum sequence length
+        vocab_size: int = 20,
+        sep_token: int = 102,
+        pad_token: int = 103,
+        unique_values: bool = True,  # Whether sequences should have unique tokens
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.n_samples = n_samples
+        self.min_range_size = min_range_size
+        self.max_range_size = max_range_size
+        self.vocab_size = vocab_size
+        self.sep_token = sep_token
+        self.pad_token = pad_token
+        self.unique_values = unique_values
+        
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+        
+        # Pregenerate all samples
+        self.sequences = []
+        for _ in range(n_samples):
+            # 1) Sample sequence length uniformly from [min_range_size, max_range_size]
+            seq_length = torch.randint(self.min_range_size, self.max_range_size + 1, (1,)).item()
+            
+            # 2) Create random input sequence
+            if self.unique_values:
+                # Ensure sequence length doesn't exceed vocab_size for unique values
+                seq_length = min(seq_length, self.vocab_size)
+                # Sample unique values without replacement
+                input_seq = torch.randperm(self.vocab_size)[:seq_length]
+            else:
+                # Sample with replacement (can have duplicates)
+                input_seq = torch.randint(0, self.vocab_size, (seq_length,))
+            
+            # 3) Copy the input sequence (output = input)
+            output_seq = input_seq.clone()
+            
+            # Create full sequence: input + [sep_token] + copied_output
             full_seq = torch.cat([
                 input_seq,
                 torch.tensor([self.sep_token]),

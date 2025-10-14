@@ -12,11 +12,14 @@ wandb:
   log_final_only: false
 
 dataset:
-  # Training data - shorter sequences (1-10)
+  # Dataset type
+  name: CopyDataset
+  
+  # Training data - shorter sequences (1-8)
   train_min_range: 1
   train_max_range: 8 
   
-  # Test/validation data - longer sequences (11-15)
+  # Test/validation data - longer sequences (9-16)
   test_min_range: 9 
   test_max_range: 16
   
@@ -37,8 +40,8 @@ model:
   n_heads: 4
   d_ff: 64  # Smaller for pattern search as in original config
   max_len: 64
-  dropout: 0.0  # No dropout for pattern search
-  model_count: 128  # Smaller model count for faster experimentation
+  dropout: 0.1  # No dropout for pattern search
+  model_count: 16  # Smaller model count for faster experimentation
   init: regular
 
 optimizer:

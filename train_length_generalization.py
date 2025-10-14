@@ -10,7 +10,7 @@ import argparse
 import random
 import numpy as np
 from utils import TransformerModels, calculate_transformer_metrics
-from datasets import CountSequenceDataset
+from datasets import CountSequenceDataset, SortingDataset, CopyDataset
 from fastargs import Section, Param, get_current_config
 from fastargs.validation import OneOf
 from fastargs.decorators import param, section
@@ -44,7 +44,10 @@ Section("wandb", "Weights & Biases logging parameters").params(
     log_final_only=Param(bool, default=False, desc="Only log final results, not during training")
 )
 
-Section("dataset", "CountSequenceDataset parameters").params(
+Section("dataset", "Dataset parameters for sequence tasks").params(
+    # Dataset type selection
+    name=Param(str, default="CountSequenceDataset", desc="Dataset type: CountSequenceDataset, SortingDataset, or CopyDataset"),
+    
     # Training data length range
     train_min_range=Param(int, default=1, desc="Minimum sequence length for training"),
     train_max_range=Param(int, default=8, desc="Maximum sequence length for training"), 
@@ -105,6 +108,7 @@ Section("optimizer", "Training parameters").params(
 # ============================================================================
 
 @section('dataset')
+@param('name')
 @param('train_min_range')
 @param('train_max_range')
 @param('test_min_range')
@@ -116,45 +120,62 @@ Section("optimizer", "Training parameters").params(
 @param('sep_token')
 @param('pad_token')
 @param('max_length')
-def create_datasets(train_min_range, train_max_range, test_min_range, test_max_range,
+def create_datasets(name, train_min_range, train_max_range, test_min_range, test_max_range,
                    train_samples, val_samples, test_samples, vocab_size, sep_token, pad_token, max_length, run_seed=42):
     """Create train, validation, and test datasets with different sequence length ranges."""
     
-    print(f"Creating datasets:")
+    # Map dataset names to classes
+    dataset_classes = {
+        "CountSequenceDataset": CountSequenceDataset,
+        "SortingDataset": SortingDataset,
+        "CopyDataset": CopyDataset
+    }
+    
+    if name not in dataset_classes:
+        raise ValueError(f"Unknown dataset name: {name}. Available: {list(dataset_classes.keys())}")
+    
+    dataset_class = dataset_classes[name]
+    
+    print(f"Creating {name} datasets:")
     print(f"  Train: sequences length {train_min_range}-{train_max_range}, {train_samples} samples")
     print(f"  Val/Test: sequences length {test_min_range}-{test_max_range}, {val_samples}/{test_samples} samples")
     
+    # Common dataset parameters
+    dataset_kwargs = {
+        'vocab_size': vocab_size,
+        'sep_token': sep_token,
+        'pad_token': pad_token
+    }
+    
+    # Add unique_values=True for CopyDataset (already default in class but explicit here)
+    if name == "CopyDataset":
+        dataset_kwargs['unique_values'] = True
+    
     # Training dataset - shorter sequences
-    train_dataset = CountSequenceDataset(
+    train_dataset = dataset_class(
         n_samples=train_samples,
         min_range_size=train_min_range,
         max_range_size=train_max_range,
-        vocab_size=vocab_size,
-        sep_token=sep_token,
-        pad_token=pad_token,
-        seed=run_seed  # Use run-specific seed
+        seed=run_seed,  # Use run-specific seed
+        **dataset_kwargs
     )
     
-    # Validation dataset - longer sequences
-    val_dataset = CountSequenceDataset(
+    # Validation dataset - validation on same size sequences that are unseen 
+    val_dataset = dataset_class(
         n_samples=val_samples,
-        min_range_size=test_min_range,
-        max_range_size=test_max_range,
-        vocab_size=vocab_size,
-        sep_token=sep_token,
-        pad_token=pad_token,
-        seed=run_seed + 1000  # Different but deterministic seed for val data
+        min_range_size=train_min_range,
+        max_range_size=train_max_range,
+        seed=run_seed + 1000,  # Different but deterministic seed for val data
+        **dataset_kwargs
     )
     
     # Test dataset - longer sequences  
-    test_dataset = CountSequenceDataset(
+    test_dataset = dataset_class(
         n_samples=test_samples,
         min_range_size=test_min_range,
         max_range_size=test_max_range,
-        vocab_size=vocab_size,
-        sep_token=sep_token,
-        pad_token=pad_token,
-        seed=run_seed + 2000  # Different but deterministic seed for test data
+        seed=run_seed + 2000,  # Different but deterministic seed for test data
+        **dataset_kwargs
     )
     
     # Convert to tensors
@@ -285,7 +306,8 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
     
     # Create optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=epochs//4, gamma=0.5)
+    step_size = max(1, epochs//4)  # Ensure step_size is at least 1
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
     
     best_val_acc = 0.0
     for epoch in range(epochs):
@@ -311,6 +333,7 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
                 # Standard evaluation
                 train_loss, train_acc, train_em = calculate_transformer_metrics(train_data, None, model, None)
                 val_loss, val_acc, val_em = calculate_transformer_metrics(val_data, None, model, None)
+                test_loss, test_acc, test_em = calculate_transformer_metrics(test_data, None, model, None)
                 
                 # Wandb logging
                 config = get_current_config()
@@ -323,11 +346,15 @@ def train_sgd(train_data, val_data, test_data, model, lr, momentum, batch_size, 
                         "val/loss": val_loss.item(),
                         "val/accuracy": val_acc.item(),
                         "val/exact_match": val_em.item(),
+                        "val/loss_length_gen": test_loss.item(),
+                        "val/accuracy_length_gen": test_acc.item(),
+                        "val/exact_match_length_gen": test_em.item(),
                         "learning_rate": scheduler.get_last_lr()[0]
                     })
                 
                 print(f"Epoch {epoch:3d} | Train: acc={train_acc.item():.3f}, em={train_em.item():.3f}, loss={train_loss.item():.3f} | \n"
                     f"Val: acc={val_acc.item():.3f}, em={val_em.item():.3f}, loss={val_loss.item():.3f} | "
+                    f"Test: acc={test_acc.item():.3f}, em={test_em.item():.3f}, loss={test_loss.item():.3f}"
                     )
 
                 # Early stopping based on validation accuracy
@@ -358,6 +385,7 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
             model.eval
             train_loss, train_acc, train_em = calculate_transformer_metrics(train_data, None, model, None)
             val_loss, val_acc, val_em = calculate_transformer_metrics(val_data, None, model, None)
+            test_loss, test_acc, test_em = calculate_transformer_metrics(test_data, None, model, None)
             
             # Wandb logging
             config = get_current_config()
@@ -368,16 +396,20 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
                     "train/exact_match": train_em.item(),
                     "val/accuracy": val_acc.item(),
                     "val/exact_match": val_em.item(),
+                    "val/accuracy_length_gen": test_acc.item(),
+                    "val/exact_match_length_gen": test_em.item(),
                 }
                 # Add loss metrics if available
                 metrics.update({
                     "train/loss": train_loss.item(),
                     "val/loss": val_loss.item(),
+                    "val/loss_length_gen": test_loss.item(),
                 })
                 wandb.log(metrics)
 
             print(f"Epoch {epoch:3d} | Train: acc={train_acc.item():.3f}, em={train_em.item():.3f}, loss={train_loss.item():.3f} | \n"
                 f"Val: acc={val_acc.item():.3f}, em={val_em.item():.3f}, loss={val_loss.item():.3f} | "
+                f"Test: acc={test_acc.item():.3f}, em={test_em.item():.3f}, loss={test_loss.item():.3f}"
                 )
             
             # Early stopping based on validation accuracy  
@@ -385,12 +417,6 @@ def train_pattern_search(train_data, val_data, test_data, model, epochs, es_acc,
                 print(f"Early stopping at epoch {epoch}")
                 break
         
-        # Update radius with cosine scheduler at the end of every epoch
-        if use_cosine_radius_scheduler:
-            # Cosine decay schedule: starts at initial_radius, goes to 0, then back up
-            cosine_factor = 0.5 * (1 + math.cos(math.pi * (epoch % cosine_period) / cosine_period))
-            model.radius = initial_radius * cosine_factor
-    
     return model.get_model_subsets([0]).to(next(model.parameters()).device)
 
 # ============================================================================

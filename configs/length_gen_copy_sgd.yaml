@@ -12,11 +12,14 @@ wandb:
   log_final_only: false
 
 dataset:
-  # Training data - shorter sequences (1-10)
+  # Dataset type
+  name: CopyDataset
+  
+  # Training data - shorter sequences (1-8)
   train_min_range: 1
   train_max_range: 8 
   
-  # Test/validation data - longer sequences (11-15) 
+  # Test/validation data - longer sequences (9-16) 
   test_min_range: 9 
   test_max_range: 16
   
@@ -32,7 +35,7 @@ dataset:
   max_length: 32
 
 model:
-  d_model: 32
+  d_model: 64 
   n_layers: 2
   n_heads: 4
   d_ff: 64 
@@ -50,7 +53,7 @@ optimizer:
   batch_size: 128
   
   # Training parameters
-  epochs: 400
+  epochs: 800
   es_acc: 0.99
   
   # Evaluation parameters
