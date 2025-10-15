@@ -4,12 +4,12 @@ experiment:
   seed: 420
 
 wandb:
-  enabled: false 
+  enabled: true
   project: length-generalization
   entity: null
   offline: false
   log_during_training: true
-  log_final_only: true 
+  log_final: false 
 
 dataset:
   # Training data - shorter sequences (1-10)
