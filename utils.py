@@ -6,7 +6,7 @@ import numpy as np
 import torch.nn.functional as F
 from itertools import chain
 import random
-from transformer import DecoderOnlyTransformer
+# from transformer import DecoderOnlyTransformer  # Commented out - module removed
 
 def sample_position_offset(max_offset, seq_len, max_len):
     """
@@ -990,7 +990,7 @@ class LinearModels(nn.Module):
 
 
 class TransformerModels(nn.Module):
-    def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103, init='regular'):
+    def __init__(self, vocab_size, d_model, n_layers, n_heads, d_ff, max_len, model_count, device, dropout=0.1, sep_token_id=102, pad_token_id=103, init='regular', position_encoding_type='absolute', rope_base=10000):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
@@ -1003,13 +1003,27 @@ class TransformerModels(nn.Module):
         self.dropout = dropout
         self.sep_token_id = sep_token_id
         self.pad_token_id = pad_token_id
+        self.position_encoding_type = position_encoding_type
+        self.rope_base = rope_base
         
         # Vectorized parameters following LeNet pattern
         # Token embeddings: (model_count, vocab_size, d_model)
         self.token_emb_weight = nn.Parameter(torch.randn(model_count, vocab_size, d_model))
-        
-        # Position embeddings: (model_count, max_len, d_model)  
-        self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
+
+        # Position embeddings: conditionally created based on position_encoding_type
+        if self.position_encoding_type == 'absolute':
+            # Absolute position embeddings: (model_count, max_len, d_model)
+            self.pos_emb = nn.Parameter(torch.zeros(model_count, max_len, d_model))
+        elif self.position_encoding_type == 'rotary':
+            # No learnable position embeddings for RoPE
+            self.pos_emb = None
+            # Precompute RoPE frequencies
+            self._init_rope_frequencies()
+        elif self.position_encoding_type == 'none':
+            # No position embeddings
+            self.pos_emb = None
+        else:
+            raise ValueError(f"Invalid position_encoding_type: {self.position_encoding_type}. Must be 'absolute', 'rotary', or 'none'.")
         
         # Transformer layer parameters
         self.transformer_params = nn.ParameterDict()
@@ -1066,9 +1080,10 @@ class TransformerModels(nn.Module):
         with torch.no_grad():
             # Initialize token embeddings
             nn.init.normal_(self.token_emb_weight, mean=0.0, std=0.02)
-            
-            # Initialize position embeddings 
-            nn.init.zeros_(self.pos_emb)
+
+            # Initialize position embeddings (only if using absolute)
+            if self.pos_emb is not None:
+                nn.init.zeros_(self.pos_emb)
             
             # Initialize transformer layer parameters
             for layer in range(self.n_layers):
@@ -1092,6 +1107,74 @@ class TransformerModels(nn.Module):
             # Output head
             nn.init.xavier_uniform_(self.head_weight)
             nn.init.zeros_(self.head_bias)
+
+    def _init_rope_frequencies(self):
+        """Initialize and cache the frequency tensor for RoPE."""
+        head_dim = self.d_model // self.n_heads
+        # Compute inverse frequencies: 1 / (base^(2i/d)) for i in [0, d/2)
+        inv_freq = 1.0 / (self.rope_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        # Register as buffer (not a parameter, but part of model state)
+        self.register_buffer('rope_inv_freq', inv_freq)
+
+    def _apply_rotary_embeddings(self, q, k, seq_len):
+        """Apply rotary position embeddings to Q and K.
+
+        Args:
+            q: (batch_size, model_count, n_heads, seq_len, head_dim)
+            k: (batch_size, model_count, n_heads, seq_len, head_dim)
+            seq_len: sequence length
+
+        Returns:
+            q_rot, k_rot: Q and K with rotary embeddings applied
+        """
+        # Create position indices [0, 1, 2, ..., seq_len-1]
+        positions = torch.arange(seq_len, device=q.device, dtype=self.rope_inv_freq.dtype)
+
+        # Compute frequencies for each position: outer product of positions and inv_freq
+        # positions: (seq_len,), rope_inv_freq: (head_dim/2,)
+        # freqs: (seq_len, head_dim/2)
+        freqs = torch.outer(positions, self.rope_inv_freq)
+
+        # Create cos and sin embeddings
+        # emb: (seq_len, head_dim/2)
+        cos_emb = freqs.cos()
+        sin_emb = freqs.sin()
+
+        # Reshape to match q and k dimensions
+        # (seq_len, head_dim/2) -> (1, 1, 1, seq_len, head_dim/2)
+        cos_emb = cos_emb.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        sin_emb = sin_emb.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+        # Apply rotary embeddings
+        q_rot = self._rotate_half(q, cos_emb, sin_emb)
+        k_rot = self._rotate_half(k, cos_emb, sin_emb)
+
+        return q_rot, k_rot
+
+    def _rotate_half(self, x, cos_emb, sin_emb):
+        """Rotate half the hidden dimensions.
+
+        Args:
+            x: (batch_size, model_count, n_heads, seq_len, head_dim)
+            cos_emb: (1, 1, 1, seq_len, head_dim/2)
+            sin_emb: (1, 1, 1, seq_len, head_dim/2)
+
+        Returns:
+            x_rotated: (batch_size, model_count, n_heads, seq_len, head_dim)
+        """
+        # Split x into two halves along head_dim
+        head_dim = x.size(-1)
+        x1 = x[..., :head_dim // 2]  # First half
+        x2 = x[..., head_dim // 2:]  # Second half
+
+        # Apply rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
+        x_rot1 = x1 * cos_emb - x2 * sin_emb
+        x_rot2 = x1 * sin_emb + x2 * cos_emb
+
+        # Concatenate back
+        x_rotated = torch.cat([x_rot1, x_rot2], dim=-1)
+
+        return x_rotated
 
     def vectorized_token_embedding(self, x):
         """Vectorized token embedding lookup across all models.
@@ -1200,7 +1283,11 @@ class TransformerModels(nn.Module):
         qkv = qkv.reshape(batch_size, model_count, seq_len, self.n_heads, 3 * self.d_model // self.n_heads)
         qkv = qkv.transpose(2, 3)  # (batch_size, model_count, n_heads, seq_len, 3*head_dim)
         q, k, v = qkv.chunk(3, dim=-1)  # Each: (batch_size, model_count, n_heads, seq_len, head_dim)
-        
+
+        # Apply rotary position embeddings if using RoPE
+        if self.position_encoding_type == 'rotary':
+            q, k = self._apply_rotary_embeddings(q, k, seq_len)
+
         # Compute attention scores
         head_dim = self.d_model // self.n_heads
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (head_dim ** 0.5)
@@ -1298,19 +1385,26 @@ class TransformerModels(nn.Module):
         return logits
 
     def forward(self, x, position_ids=None, position_offset=None):
-        # x shape: (batch_size, seq_len)  
+        # x shape: (batch_size, seq_len)
         # Output shape: (batch_size, model_count, seq_len, vocab_size)
         batch_size, seq_len = x.size()
-        
+
         # Token embeddings - vectorized across models
         token_emb = self.vectorized_token_embedding(x)  # (batch_size, model_count, seq_len, d_model)
-        
-        # Position embeddings with optional offset
-        # Original default behavior: use positions [0, 1, 2, ..., seq_len-1]
-        pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
-        
-        # Add embeddings
-        hidden = token_emb + pos_emb  # (batch_size, model_count, seq_len, d_model)
+
+        # Add position embeddings based on position_encoding_type
+        if self.position_encoding_type == 'absolute':
+            # Absolute position embeddings
+            pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
+            hidden = token_emb + pos_emb  # (batch_size, model_count, seq_len, d_model)
+        elif self.position_encoding_type == 'rotary':
+            # RoPE: no position embeddings added here, applied in attention
+            hidden = token_emb  # (batch_size, model_count, seq_len, d_model)
+        elif self.position_encoding_type == 'none':
+            # No position embeddings
+            hidden = token_emb  # (batch_size, model_count, seq_len, d_model)
+        else:
+            raise ValueError(f"Invalid position_encoding_type: {self.position_encoding_type}")
         
         # Pass through transformer layers
         for layer_idx in range(self.n_layers):
@@ -1606,7 +1700,7 @@ class TransformerModels(nn.Module):
             idx = idx.tolist()
         elif isinstance(idx, int):
             idx = [idx]
-            
+
         new_model_count = len(idx)
         new_model = TransformerModels(
             vocab_size=self.vocab_size,
@@ -1619,24 +1713,28 @@ class TransformerModels(nn.Module):
             device=self.device,
             dropout=self.dropout,
             sep_token_id=self.sep_token_id,
-            pad_token_id=self.pad_token_id
+            pad_token_id=self.pad_token_id,
+            position_encoding_type=self.position_encoding_type,
+            rope_base=self.rope_base
         )
-        
+
         # Copy the selected model parameters
         with torch.no_grad():
             for new_idx, old_idx in enumerate(idx):
                 # Copy basic parameters
                 new_model.token_emb_weight.data[new_idx] = self.token_emb_weight.data[old_idx]
-                new_model.pos_emb.data[new_idx] = self.pos_emb.data[old_idx]
+                # Only copy pos_emb if it exists (not None for rotary/none types)
+                if self.pos_emb is not None:
+                    new_model.pos_emb.data[new_idx] = self.pos_emb.data[old_idx]
                 new_model.ln_f_weight.data[new_idx] = self.ln_f_weight.data[old_idx]
                 new_model.ln_f_bias.data[new_idx] = self.ln_f_bias.data[old_idx]
                 new_model.head_weight.data[new_idx] = self.head_weight.data[old_idx]
                 new_model.head_bias.data[new_idx] = self.head_bias.data[old_idx]
-                
+
                 # Copy transformer layer parameters
                 for param_name in self.transformer_params:
                     new_model.transformer_params[param_name].data[new_idx] = self.transformer_params[param_name].data[old_idx]
-        
+
         return new_model
 if __name__ == "__main__":
     model = MLPModels(input_dim=2, output_dim=2,

@@ -76,7 +76,9 @@ Section("model", "TransformerModels parameters").params(
     max_len=Param(int, default=64, desc="Maximum position encoding length"),
     dropout=Param(float, default=0.0, desc="Dropout probability"),
     model_count=Param(int, default=16, desc="Number of parallel models for pattern search"),
-    init=Param(str, default="regular", desc="Parameter initialization method")
+    init=Param(str, default="regular", desc="Parameter initialization method"),
+    position_encoding_type=Param(str, default="absolute", desc="Position encoding type: 'absolute', 'rotary', or 'none'"),
+    rope_base=Param(int, default=10000, desc="Base for rotary position embeddings")
 )
 
 Section("optimizer", "Training parameters").params(
@@ -245,21 +247,23 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
 
 @section('model')
 @param('d_model')
-@param('n_layers') 
+@param('n_layers')
 @param('n_heads')
 @param('d_ff')
 @param('max_len')
 @param('dropout')
 @param('model_count')
 @param('init')
+@param('position_encoding_type')
+@param('rope_base')
 @section('dataset')
 @param('vocab_size')
 @param('sep_token')
 @param('pad_token')
 def create_model(d_model, n_layers, n_heads, d_ff, max_len, dropout, model_count,
-                vocab_size, sep_token, pad_token, device, init):
+                vocab_size, sep_token, pad_token, device, init, position_encoding_type, rope_base):
     """Create a TransformerModels instance."""
-    
+
     model = TransformerModels(
         vocab_size=vocab_size,
         d_model=d_model,
@@ -272,7 +276,9 @@ def create_model(d_model, n_layers, n_heads, d_ff, max_len, dropout, model_count
         dropout=dropout,
         sep_token_id=sep_token,
         pad_token_id=pad_token,
-        init=init
+        init=init,
+        position_encoding_type=position_encoding_type,
+        rope_base=rope_base
     )
     
     print(f"Created model: d_model={d_model}, n_layers={n_layers}, n_heads={n_heads}")
