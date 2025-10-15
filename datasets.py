@@ -497,6 +497,8 @@ class CountSequenceDataset(Dataset):
     Input: [2, 5]
     Output: [2, 3, 4, 5] 
     Full sequence: [2, 5, 102, 2, 3, 4, 5]  (102 is separator '>')
+    
+    This dataset ensures all counting problems are unique (no duplicate [min_val, max_val] pairs).
     """
     
     def __init__(
@@ -517,24 +519,46 @@ class CountSequenceDataset(Dataset):
         self.sep_token = sep_token
         self.pad_token = pad_token
         
+        # Calculate total number of unique counting problems possible
+        total_unique_problems = 0
+        for range_size in range(self.min_range_size, self.max_range_size + 1):
+            # For each range_size, min_val can go from 0 to vocab_size - range_size - 1
+            # (because max_val = min_val + range_size must be < vocab_size)
+            max_possible_min = self.vocab_size - range_size
+            if max_possible_min > 0:
+                total_unique_problems += max_possible_min
+        
+        # Check if we can generate enough unique samples
+        if total_unique_problems < n_samples:
+            raise ValueError(
+                f"Cannot generate {n_samples} unique counting problems with given constraints. "
+                f"Maximum possible unique problems: {total_unique_problems}. "
+                f"Consider increasing vocab_size ({vocab_size}) or reducing n_samples, "
+                f"or adjusting range constraints (min_range_size={min_range_size}, max_range_size={max_range_size})."
+            )
+        
         # Set seed for reproducibility
         torch.manual_seed(seed)
         
-        # Pregenerate all samples
-        self.sequences = []
-        for _ in range(n_samples):
-            # 1) Sample range size uniformly from [min_range_size, max_range_size]
-            range_size = torch.randint(self.min_range_size, self.max_range_size + 1, (1,)).item()
-            
-            # 2) Sample min_val ensuring max_val stays within vocab_size
+        # Generate all possible unique (min_val, max_val) pairs
+        all_possible_pairs = []
+        for range_size in range(self.min_range_size, self.max_range_size + 1):
             max_possible_min = self.vocab_size - range_size
-            min_val = torch.randint(0, max_possible_min, (1,)).item()
-            max_val = min_val + range_size
-            
-            # 3) Create input sequence [min_val, max_val]
+            for min_val in range(max_possible_min):
+                max_val = min_val + range_size
+                all_possible_pairs.append((min_val, max_val))
+        
+        # Randomly sample n_samples unique pairs without replacement
+        selected_indices = torch.randperm(len(all_possible_pairs))[:n_samples]
+        selected_pairs = [all_possible_pairs[i] for i in selected_indices]
+        
+        # Pregenerate all samples using the unique pairs
+        self.sequences = []
+        for min_val, max_val in selected_pairs:
+            # 1) Create input sequence [min_val, max_val]
             input_seq = torch.tensor([min_val, max_val])
             
-            # 4) Apply count function to get output sequence
+            # 2) Apply count function to get output sequence
             output_seq = count_fn(input_seq)
             
             # Create full sequence: [min_val, max_val] + [sep_token] + [output]

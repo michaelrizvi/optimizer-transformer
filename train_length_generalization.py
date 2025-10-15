@@ -151,23 +151,34 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
     if name == "CopyDataset":
         dataset_kwargs['unique_values'] = True
     
-    # Training dataset - shorter sequences
-    train_dataset = dataset_class(
-        n_samples=train_samples,
+    # Create one large unique dataset with train_samples + val_samples
+    # This ensures no overlap between train and validation sets
+    combined_samples = train_samples + val_samples
+    combined_dataset = dataset_class(
+        n_samples=combined_samples,
         min_range_size=train_min_range,
         max_range_size=train_max_range,
-        seed=run_seed,  # Use run-specific seed
+        seed=run_seed,  # Use run-specific seed for the combined dataset
         **dataset_kwargs
     )
     
-    # Validation dataset - validation on same size sequences that are unseen 
-    val_dataset = dataset_class(
-        n_samples=val_samples,
-        min_range_size=train_min_range,
-        max_range_size=train_max_range,
-        seed=run_seed + 1000,  # Different but deterministic seed for val data
-        **dataset_kwargs
-    )
+    # Split the combined dataset into train and validation sets
+    # First train_samples go to training, remaining go to validation
+    train_sequences = [combined_dataset[i] for i in range(train_samples)]
+    val_sequences = [combined_dataset[i] for i in range(train_samples, combined_samples)]
+
+    # Check for duplicates between train and val sets and count unique examples
+    train_pairs = set((seq[0].item(), seq[1].item()) for seq in train_sequences)
+    val_pairs = set((seq[0].item(), seq[1].item()) for seq in val_sequences)
+    overlap = train_pairs.intersection(val_pairs)
+    
+    print(f"  Train set unique examples: {len(train_pairs)}")
+    print(f"  Val set unique examples: {len(val_pairs)}")
+    
+    if overlap:
+        raise ValueError(f"Found {len(overlap)} duplicate examples between train and val sets: {overlap}")
+    else:
+        print(f"  ✓ No duplicates between train and val sets")
     
     # Test dataset - longer sequences  
     test_dataset = dataset_class(
@@ -177,12 +188,11 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
         seed=run_seed + 2000,  # Different but deterministic seed for test data
         **dataset_kwargs
     )
-    
+
     # Convert to tensors
     from torch.nn.utils.rnn import pad_sequence
     
-    train_sequences = [train_dataset[i] for i in range(len(train_dataset))]
-    val_sequences = [val_dataset[i] for i in range(len(val_dataset))]
+    # train_sequences and val_sequences are already created above from the split
     test_sequences = [test_dataset[i] for i in range(len(test_dataset))]
     
     # Pad sequences to same length
