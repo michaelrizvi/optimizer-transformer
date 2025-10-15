@@ -1,0 +1,62 @@
+experiment:
+  num_runs: 1
+  device: cuda
+  seed: 420
+
+wandb:
+  enabled: false 
+  project: length-generalization
+  entity: null
+  offline: false
+  log_during_training: true
+  log_final: false
+
+dataset:
+  # Dataset type
+  name: MajorityDataset
+
+  # Training data - shorter sequences (1-16)
+  train_min_range: 1
+  train_max_range: 16
+
+  # Test/validation data - longer sequences (17-32)
+  test_min_range: 17
+  test_max_range: 32
+
+  # Dataset sizes
+  train_samples: 500
+  val_samples: 200
+  test_samples: 200
+
+  # Vocabulary parameters
+  vocab_size: 4 
+  sep_token: 3
+  pad_token: 2
+  max_length: 128
+
+model:
+  d_model: 32 
+  n_layers: 1
+  n_heads: 2
+  d_ff: 32
+  max_len: 64 
+  dropout: 0.1
+  model_count: 1
+  init: regular
+  position_encoding_type: rotary
+  rope_base: 64
+
+optimizer:
+  name: SGD
+
+  # SGD parameters
+  lr: 0.001
+  momentum: 0.9
+  batch_size: 128
+
+  # Training parameters
+  epochs: 2000
+  es_acc: 0.999
+
+  # Evaluation parameters
+  eval_frequency: 10

@@ -471,6 +471,18 @@ class SlabLinear(Dataset):
     def __getitem__(self, index):
         return self.data[index].astype(np.float32), self.labels[index].astype(np.int64)
 
+def majority_fn(input_seq):
+    """
+    Given input sequence of tokens from vocab [0, vocab_size), return the majority token.
+    Returns the token that appears most frequently in the sequence.
+    """
+    # Count occurrences of each value
+    unique_vals, counts = torch.unique(input_seq, return_counts=True)
+    # Find the value with maximum count
+    majority_idx = torch.argmax(counts)
+    return unique_vals[majority_idx].unsqueeze(0)
+
+
 def count_fn(input_seq):
     """
     Given input sequence [min_val, max_val], return counting sequence [min_val, min_val+1, ..., max_val]
@@ -642,16 +654,16 @@ class SortingDataset(Dataset):
 class CopyDataset(Dataset):
     """
     Dataset for COPY task: given random sequence, generate copy of the sequence.
-    
+
     This dataset generates sequences of the form: [input_seq] + [sep_token] + [input_seq]
     For next-token prediction training, where the model learns to copy sequences.
-    
+
     Example:
     Input: [4, 12, 3, 7]
-    Output: [4, 12, 3, 7] 
+    Output: [4, 12, 3, 7]
     Full sequence: [4, 12, 3, 7, 102, 4, 12, 3, 7]  (102 is separator '>')
     """
-    
+
     def __init__(
         self,
         n_samples: int = 5000,
@@ -671,16 +683,16 @@ class CopyDataset(Dataset):
         self.sep_token = sep_token
         self.pad_token = pad_token
         self.unique_values = unique_values
-        
+
         # Set seed for reproducibility
         torch.manual_seed(seed)
-        
+
         # Pregenerate all samples
         self.sequences = []
         for _ in range(n_samples):
             # 1) Sample sequence length uniformly from [min_range_size, max_range_size]
             seq_length = torch.randint(self.min_range_size, self.max_range_size + 1, (1,)).item()
-            
+
             # 2) Create random input sequence
             if self.unique_values:
                 # Ensure sequence length doesn't exceed vocab_size for unique values
@@ -690,18 +702,125 @@ class CopyDataset(Dataset):
             else:
                 # Sample with replacement (can have duplicates)
                 input_seq = torch.randint(0, self.vocab_size, (seq_length,))
-            
+
             # 3) Copy the input sequence (output = input)
             output_seq = input_seq.clone()
-            
+
             # Create full sequence: input + [sep_token] + copied_output
             full_seq = torch.cat([
                 input_seq,
                 torch.tensor([self.sep_token]),
                 output_seq
             ])
-            
+
             self.sequences.append(full_seq)
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return self.sequences[index]
+
+
+class MajorityDataset(Dataset):
+    """
+    Dataset for MAJORITY task: given random sequence, identify the most frequent token.
+
+    This dataset generates sequences of the form: [input_seq] + [sep_token] + [majority_token]
+    For next-token prediction training, where the model learns to identify the majority element.
+
+    Example (with vocab_size=2, binary):
+    Input: [1, 1, 0, 0, 1]
+    Output: [1] (since 1 appears 3 times vs 0 appears 2 times)
+    Full sequence: [1, 1, 0, 0, 1, 102, 1]  (102 is separator '>')
+
+    This dataset ensures:
+    - All sequences are unique (no duplicate sequences)
+    - No ties (one token always has strict majority)
+    - Sequence lengths are sampled uniformly from [1, max_seq_len]
+    """
+
+    def __init__(
+        self,
+        n_samples: int = 5000,
+        max_seq_len: int = 10,
+        vocab_size: int = 2,
+        sep_token: int = 102,
+        pad_token: int = 103,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.n_samples = n_samples
+        self.max_seq_len = max_seq_len
+        self.vocab_size = vocab_size
+        self.sep_token = sep_token
+        self.pad_token = pad_token
+
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+
+        # Generate all samples and track uniqueness
+        self.sequences = []
+        seen_sequences = set()
+
+        # Estimate maximum possible unique sequences
+        # This is a rough upper bound - actual count depends on no-tie constraint
+        max_attempts = n_samples * 100  # Allow many attempts to find unique sequences
+        attempts = 0
+
+        while len(self.sequences) < n_samples and attempts < max_attempts:
+            attempts += 1
+
+            # 1) Sample sequence length uniformly from [1, max_seq_len]
+            seq_length = torch.randint(1, self.max_seq_len + 1, (1,)).item()
+
+            # 2) Create random input sequence with values from [0, vocab_size)
+            # IMPORTANT: Exclude sep_token and pad_token from input sequences to avoid ambiguity
+            input_seq = torch.randint(0, self.vocab_size, (seq_length,))
+
+            # Replace any occurrences of sep_token or pad_token with valid vocab tokens
+            # This ensures input sequences don't contain special tokens
+            while (input_seq == self.sep_token).any() or (input_seq == self.pad_token).any():
+                mask = (input_seq == self.sep_token) | (input_seq == self.pad_token)
+                input_seq[mask] = torch.randint(0, self.vocab_size, (mask.sum().item(),))
+
+            # 3) Check for ties - reject sequences where no clear majority exists
+            unique_vals, counts = torch.unique(input_seq, return_counts=True)
+            max_count = torch.max(counts)
+            num_with_max_count = torch.sum(counts == max_count).item()
+
+            # Skip if there's a tie (multiple values have the same max count)
+            if num_with_max_count > 1:
+                continue
+
+            # 4) Check for uniqueness - convert to tuple for hashing
+            seq_tuple = tuple(input_seq.tolist())
+            if seq_tuple in seen_sequences:
+                continue
+
+            # 5) This is a valid unique sequence with no ties
+            seen_sequences.add(seq_tuple)
+
+            # 6) Apply majority function to get output
+            output_seq = majority_fn(input_seq)
+
+            # Create full sequence: input + [sep_token] + majority_token
+            full_seq = torch.cat([
+                input_seq,
+                torch.tensor([self.sep_token]),
+                output_seq
+            ])
+
+            self.sequences.append(full_seq)
+
+        # Check if we successfully generated enough unique samples
+        if len(self.sequences) < n_samples:
+            raise ValueError(
+                f"Cannot generate {n_samples} unique majority problems with given constraints. "
+                f"Only generated {len(self.sequences)} unique sequences after {max_attempts} attempts. "
+                f"Consider increasing max_seq_len ({max_seq_len}), increasing vocab_size ({vocab_size}), "
+                f"or reducing n_samples."
+            )
 
     def __len__(self) -> int:
         return self.n_samples

@@ -10,7 +10,7 @@ import argparse
 import random
 import numpy as np
 from utils import TransformerModels, calculate_transformer_metrics
-from datasets import CountSequenceDataset, SortingDataset, CopyDataset
+from datasets import CountSequenceDataset, SortingDataset, CopyDataset, MajorityDataset
 from fastargs import Section, Param, get_current_config
 from fastargs.validation import OneOf
 from fastargs.decorators import param, section
@@ -46,7 +46,7 @@ Section("wandb", "Weights & Biases logging parameters").params(
 
 Section("dataset", "Dataset parameters for sequence tasks").params(
     # Dataset type selection
-    name=Param(str, default="CountSequenceDataset", desc="Dataset type: CountSequenceDataset, SortingDataset, or CopyDataset"),
+    name=Param(str, default="CountSequenceDataset", desc="Dataset type: CountSequenceDataset, SortingDataset, CopyDataset, or MajorityDataset"),
     
     # Training data length range
     train_min_range=Param(int, default=1, desc="Minimum sequence length for training"),
@@ -128,39 +128,50 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
     dataset_classes = {
         "CountSequenceDataset": CountSequenceDataset,
         "SortingDataset": SortingDataset,
-        "CopyDataset": CopyDataset
+        "CopyDataset": CopyDataset,
+        "MajorityDataset": MajorityDataset
     }
-    
+
     if name not in dataset_classes:
         raise ValueError(f"Unknown dataset name: {name}. Available: {list(dataset_classes.keys())}")
-    
+
     dataset_class = dataset_classes[name]
-    
+
     print(f"Creating {name} datasets:")
     print(f"  Train: sequences length {train_min_range}-{train_max_range}, {train_samples} samples")
     print(f"  Val/Test: sequences length {test_min_range}-{test_max_range}, {val_samples}/{test_samples} samples")
-    
+
     # Common dataset parameters
     dataset_kwargs = {
         'vocab_size': vocab_size,
         'sep_token': sep_token,
         'pad_token': pad_token
     }
-    
+
     # Add unique_values=True for CopyDataset (already default in class but explicit here)
     if name == "CopyDataset":
         dataset_kwargs['unique_values'] = True
-    
+
     # Create one large unique dataset with train_samples + val_samples
     # This ensures no overlap between train and validation sets
     combined_samples = train_samples + val_samples
-    combined_dataset = dataset_class(
-        n_samples=combined_samples,
-        min_range_size=train_min_range,
-        max_range_size=train_max_range,
-        seed=run_seed,  # Use run-specific seed for the combined dataset
-        **dataset_kwargs
-    )
+
+    # MajorityDataset uses max_seq_len instead of min_range_size/max_range_size
+    if name == "MajorityDataset":
+        combined_dataset = dataset_class(
+            n_samples=combined_samples,
+            max_seq_len=train_max_range,
+            seed=run_seed,  # Use run-specific seed for the combined dataset
+            **dataset_kwargs
+        )
+    else:
+        combined_dataset = dataset_class(
+            n_samples=combined_samples,
+            min_range_size=train_min_range,
+            max_range_size=train_max_range,
+            seed=run_seed,  # Use run-specific seed for the combined dataset
+            **dataset_kwargs
+        )
     
     # Split the combined dataset into train and validation sets
     # First train_samples go to training, remaining go to validation
@@ -168,26 +179,50 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
     val_sequences = [combined_dataset[i] for i in range(train_samples, combined_samples)]
 
     # Check for duplicates between train and val sets and count unique examples
-    train_pairs = set((seq[0].item(), seq[1].item()) for seq in train_sequences)
-    val_pairs = set((seq[0].item(), seq[1].item()) for seq in val_sequences)
+    # For MajorityDataset, check the full input sequence (before separator)
+    # For CountSequenceDataset, check the first two elements [min_val, max_val]
+    if name == "MajorityDataset":
+        # Extract input sequences (before separator token)
+        def get_input_seq(seq):
+            sep_indices = (seq == sep_token).nonzero(as_tuple=True)[0]
+            if len(sep_indices) == 0:
+                # No separator found, should not happen
+                raise ValueError(f"No separator token {sep_token} found in sequence: {seq}")
+            sep_idx = sep_indices[0].item()  # Take first occurrence
+            return tuple(seq[:sep_idx].tolist())
+
+        train_pairs = set(get_input_seq(seq) for seq in train_sequences)
+        val_pairs = set(get_input_seq(seq) for seq in val_sequences)
+    else:
+        train_pairs = set((seq[0].item(), seq[1].item()) for seq in train_sequences)
+        val_pairs = set((seq[0].item(), seq[1].item()) for seq in val_sequences)
+
     overlap = train_pairs.intersection(val_pairs)
-    
+
     print(f"  Train set unique examples: {len(train_pairs)}")
     print(f"  Val set unique examples: {len(val_pairs)}")
-    
+
     if overlap:
         raise ValueError(f"Found {len(overlap)} duplicate examples between train and val sets: {overlap}")
     else:
         print(f"  ✓ No duplicates between train and val sets")
     
-    # Test dataset - longer sequences  
-    test_dataset = dataset_class(
-        n_samples=test_samples,
-        min_range_size=test_min_range,
-        max_range_size=test_max_range,
-        seed=run_seed + 2000,  # Different but deterministic seed for test data
-        **dataset_kwargs
-    )
+    # Test dataset - longer sequences
+    if name == "MajorityDataset":
+        test_dataset = dataset_class(
+            n_samples=test_samples,
+            max_seq_len=test_max_range,
+            seed=run_seed + 2000,  # Different but deterministic seed for test data
+            **dataset_kwargs
+        )
+    else:
+        test_dataset = dataset_class(
+            n_samples=test_samples,
+            min_range_size=test_min_range,
+            max_range_size=test_max_range,
+            seed=run_seed + 2000,  # Different but deterministic seed for test data
+            **dataset_kwargs
+        )
 
     # Convert to tensors
     from torch.nn.utils.rnn import pad_sequence
