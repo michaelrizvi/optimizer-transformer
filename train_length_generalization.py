@@ -513,10 +513,11 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
 
             # Create descriptive run name
             optimizer_name = config['optimizer.name']
+            dataset_name = config['dataset.name']
             train_samples = config['dataset.train_samples']
             train_range = f"{config['dataset.train_min_range']}-{config['dataset.train_max_range']}"
             test_range = f"{config['dataset.test_min_range']}-{config['dataset.test_max_range']}"
-            run_name = f"{optimizer_name}_s{train_samples}_train{train_range}_test{test_range}_run{run+1}"
+            run_name = f"{dataset_name}_{optimizer_name}_s{train_samples}_train{train_range}_test{test_range}_run{run+1}"
 
             wandb.init(
                 project=config['wandb.project'],
@@ -628,7 +629,7 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
     # Log summary to wandb (only if log_final is enabled)
     if WANDB_AVAILABLE and config['wandb.enabled'] and config['wandb.log_final']:
         # Create a summary run
-        summary_run_name = f"{config['optimizer.name']}_s{config['dataset.train_samples']}_train{config['dataset.train_min_range']}-{config['dataset.train_max_range']}_test{config['dataset.test_min_range']}-{config['dataset.test_max_range']}_SUMMARY"
+        summary_run_name = f"{config['dataset.name']}_{config['optimizer.name']}_s{config['dataset.train_samples']}_train{config['dataset.train_min_range']}-{config['dataset.train_max_range']}_test{config['dataset.test_min_range']}-{config['dataset.test_max_range']}_SUMMARY"
 
         mode = "offline" if config['wandb.offline'] else "online"
         wandb.init(
