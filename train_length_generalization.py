@@ -50,22 +50,22 @@ Section("dataset", "Dataset parameters for sequence tasks").params(
     
     # Training data length range
     train_min_range=Param(int, default=1, desc="Minimum sequence length for training"),
-    train_max_range=Param(int, default=8, desc="Maximum sequence length for training"), 
+    train_max_range=Param(int, default=16, desc="Maximum sequence length for training"), 
     
     # Test/validation data length range
-    test_min_range=Param(int, default=9, desc="Minimum sequence length for test/validation"),
-    test_max_range=Param(int, default=16, desc="Maximum sequence length for test/validation"),
-    
+    test_min_range=Param(int, default=17, desc="Minimum sequence length for test/validation"),
+    test_max_range=Param(int, default=32, desc="Maximum sequence length for test/validation"),
+
     # Dataset size parameters
     train_samples=Param(int, default=500, desc="Number of training samples"),
     val_samples=Param(int, default=200, desc="Number of validation samples"),
     test_samples=Param(int, default=200, desc="Number of test samples"),
     
     # Vocabulary parameters
-    vocab_size=Param(int, default=32, desc="Vocabulary size"),  # Increased to accommodate sep/pad tokens
-    sep_token=Param(int, default=30, desc="Separator token ID"),
-    pad_token=Param(int, default=31, desc="Padding token ID"),
-    max_length=Param(int, default=32, desc="Maximum sequence length (for padding)")
+    vocab_size=Param(int, default=64, desc="Vocabulary size"),  # Increased to accommodate sep/pad tokens
+    sep_token=Param(int, default=63, desc="Separator token ID"),
+    pad_token=Param(int, default=62, desc="Padding token ID"),
+    max_length=Param(int, default=128, desc="Maximum sequence length (for padding)")
 )
 
 Section("model", "TransformerModels parameters").params(
@@ -544,10 +544,17 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
         
         # Create datasets with run-specific seeds
         train_data, val_data, test_data = create_datasets(run_seed=run_seed)
-        
+
         # Create model
         model = create_model(device=device)
-        
+
+        # Store initial positional encodings for comparison after training
+        config = get_current_config()
+        if config['model.position_encoding_type'] == 'absolute' and hasattr(model, 'pos_emb') and model.pos_emb is not None:
+            initial_pos_emb = model.pos_emb.clone().detach()
+        else:
+            initial_pos_emb = None
+
         # Train model
         trained_model = train(train_data, val_data, test_data, model)
         
@@ -614,7 +621,195 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
             print(f"  Train: acc={results['train_acc']:.3f}, em={results['train_em']:.3f}")
             print(f"  Val:   acc={results['val_acc']:.3f}, em={results['val_em']:.3f}")
             print(f"  Test:  acc={results['test_acc']:.3f}, em={results['test_em']:.3f}")
-    
+
+            # Check which positional encodings haven't changed during training
+            if initial_pos_emb is not None and hasattr(trained_model, 'pos_emb') and trained_model.pos_emb is not None:
+                final_pos_emb = trained_model.pos_emb.detach()
+
+                # Check for each position T which models have unchanged encodings
+                print(f"\n{'='*80}")
+                print("POSITIONAL ENCODING ANALYSIS (after training)")
+                print("="*80)
+
+                # Compare encodings with a small tolerance for numerical precision
+                tolerance = 1e-7
+                unchanged_mask = torch.allclose(initial_pos_emb, final_pos_emb, atol=tolerance)
+
+                if unchanged_mask:
+                    print("ALL positional encodings remained unchanged during training!")
+                else:
+                    # Check per position across all models and dimensions
+                    model_count, max_len, d_model = initial_pos_emb.shape
+
+                    # For each position, check if it changed for any model
+                    unchanged_positions = []
+                    changed_positions = []
+
+                    for pos in range(max_len):
+                        pos_initial = initial_pos_emb[:, pos, :]  # (model_count, d_model)
+                        pos_final = final_pos_emb[:, pos, :]      # (model_count, d_model)
+
+                        # Check if this position is unchanged across all models
+                        if torch.allclose(pos_initial, pos_final, atol=tolerance):
+                            unchanged_positions.append(pos)
+                        else:
+                            changed_positions.append(pos)
+
+                    print(f"Positions that remained UNCHANGED: {len(unchanged_positions)}/{max_len}")
+                    print(f"  Unchanged positions: {unchanged_positions}")
+
+                    print(f"Positions that CHANGED: {len(changed_positions)}/{max_len}")
+                    for pos in changed_positions:
+                        print(f"Norm at position {pos}: {torch.linalg.norm(final_pos_emb[:,pos,:])}")
+
+                    # Test both cases: modifying changed positions, then unchanged positions
+                    if len(changed_positions) > 0 and len(unchanged_positions) > 0:
+                        print(f"\n{'='*80}")
+                        print("TESTING POSITIONAL EMBEDDING IMPORTANCE")
+                        print("="*80)
+
+                        # First, verify positional embeddings are being used
+                        print(f"Model position encoding type: {trained_model.position_encoding_type}")
+                        print(f"pos_emb shape: {trained_model.pos_emb.shape if trained_model.pos_emb is not None else 'None'}")
+                        print(f"Test data shape: {test_data.shape}")
+                        print(f"Changed positions (trained): {changed_positions}")
+                        print(f"Unchanged positions (untrained): {unchanged_positions[:10]}...")
+
+                        # Save original embeddings for ALL positions
+                        original_pos_emb = trained_model.pos_emb.data.clone()
+
+                        # ============= TEST 1: Modify CHANGED positions (0-18) =============
+                        print(f"\n{'='*80}")
+                        print("TEST 1: Adding noise to CHANGED positions (0-18) - positions that got gradients")
+                        print("="*80)
+
+                        # Add noise to changed positions only
+                        with torch.no_grad():
+                            for pos in changed_positions:
+                                trained_model.pos_emb.data[:, pos, :] = torch.randn_like(trained_model.pos_emb.data[:, pos, :]) * 100.0
+
+                        # Show a few examples
+                        print(f"\nSample of modified changed positions:")
+                        for pos in changed_positions[:3]:
+                            norm = torch.linalg.norm(trained_model.pos_emb[:, pos, :]).item()
+                            print(f"  Position {pos} norm: {norm:.6f}")
+
+                        # Evaluate
+                        test_loss_changed, test_acc_changed, test_em_changed = calculate_transformer_metrics(test_data, None, trained_model, None)
+
+                        print(f"\nTest metrics after adding noise to CHANGED positions:")
+                        print(f"  Original - acc={results['test_acc']:.3f}, em={results['test_em']:.3f}")
+                        print(f"  Modified - acc={test_acc_changed.mean().item():.3f}, em={test_em_changed.mean().item():.3f}")
+                        print(f"  Change   - acc={test_acc_changed.mean().item() - results['test_acc']:.3f}, em={test_em_changed.mean().item() - results['test_em']:.3f}")
+
+                        # Restore original embeddings
+                        with torch.no_grad():
+                            trained_model.pos_emb.data.copy_(original_pos_emb)
+
+                        # ============= TEST 2: Modify UNCHANGED positions (19+) =============
+                        print(f"\n{'='*80}")
+                        print("TEST 2: Adding noise to UNCHANGED positions (19+) - positions that got NO gradients")
+                        print("="*80)
+
+                        # Add noise to unchanged positions only
+                        with torch.no_grad():
+                            for pos in unchanged_positions:
+                                trained_model.pos_emb.data[:, pos, :] = torch.randn_like(trained_model.pos_emb.data[:, pos, :]) * 100.0
+
+                        # Show a few examples
+                        print(f"\nSample of modified unchanged positions:")
+                        for pos in unchanged_positions[:3]:
+                            norm = torch.linalg.norm(trained_model.pos_emb[:, pos, :]).item()
+                            print(f"  Position {pos} norm: {norm:.6f}")
+
+                        # Evaluate
+                        test_loss_unchanged, test_acc_unchanged, test_em_unchanged = calculate_transformer_metrics(test_data, None, trained_model, None)
+
+                        print(f"\nTest metrics after adding noise to UNCHANGED positions:")
+                        print(f"  Original - acc={results['test_acc']:.3f}, em={results['test_em']:.3f}")
+                        print(f"  Modified - acc={test_acc_unchanged.mean().item():.3f}, em={test_em_unchanged.mean().item():.3f}")
+                        print(f"  Change   - acc={test_acc_unchanged.mean().item() - results['test_acc']:.3f}, em={test_em_unchanged.mean().item() - results['test_em']:.3f}")
+
+                        # Restore original embeddings
+                        with torch.no_grad():
+                            trained_model.pos_emb.data.copy_(original_pos_emb)
+
+                        # ============= TEST 3: Zero out CHANGED positions (0-18) =============
+                        print(f"\n{'='*80}")
+                        print("TEST 3: ZEROING OUT CHANGED positions (0-18) - positions that got gradients")
+                        print("="*80)
+
+                        # Zero out changed positions only
+                        with torch.no_grad():
+                            for pos in changed_positions:
+                                trained_model.pos_emb.data[:, pos, :] = 0.0
+
+                        # Show a few examples
+                        print(f"\nSample of zeroed changed positions:")
+                        for pos in changed_positions[:3]:
+                            norm = torch.linalg.norm(trained_model.pos_emb[:, pos, :]).item()
+                            print(f"  Position {pos} norm: {norm:.6f}")
+
+                        # Evaluate
+                        test_loss_changed_zero, test_acc_changed_zero, test_em_changed_zero = calculate_transformer_metrics(test_data, None, trained_model, None)
+
+                        print(f"\nTest metrics after zeroing CHANGED positions:")
+                        print(f"  Original - acc={results['test_acc']:.3f}, em={results['test_em']:.3f}")
+                        print(f"  Zeroed   - acc={test_acc_changed_zero.mean().item():.3f}, em={test_em_changed_zero.mean().item():.3f}")
+                        print(f"  Change   - acc={test_acc_changed_zero.mean().item() - results['test_acc']:.3f}, em={test_em_changed_zero.mean().item() - results['test_em']:.3f}")
+
+                        # Restore original embeddings
+                        with torch.no_grad():
+                            trained_model.pos_emb.data.copy_(original_pos_emb)
+
+                        # ============= TEST 4: Zero out UNCHANGED positions (19+) =============
+                        print(f"\n{'='*80}")
+                        print("TEST 4: ZEROING OUT UNCHANGED positions (19+) - positions that got NO gradients")
+                        print("="*80)
+
+                        # Zero out unchanged positions only (they're already zero, but let's be explicit)
+                        with torch.no_grad():
+                            for pos in unchanged_positions:
+                                trained_model.pos_emb.data[:, pos, :] = 0.0
+
+                        # Show a few examples
+                        print(f"\nSample of zeroed unchanged positions:")
+                        for pos in unchanged_positions[:3]:
+                            norm = torch.linalg.norm(trained_model.pos_emb[:, pos, :]).item()
+                            print(f"  Position {pos} norm: {norm:.6f}")
+
+                        # Evaluate
+                        test_loss_unchanged_zero, test_acc_unchanged_zero, test_em_unchanged_zero = calculate_transformer_metrics(test_data, None, trained_model, None)
+
+                        print(f"\nTest metrics after zeroing UNCHANGED positions:")
+                        print(f"  Original - acc={results['test_acc']:.3f}, em={results['test_em']:.3f}")
+                        print(f"  Zeroed   - acc={test_acc_unchanged_zero.mean().item():.3f}, em={test_em_unchanged_zero.mean().item():.3f}")
+                        print(f"  Change   - acc={test_acc_unchanged_zero.mean().item() - results['test_acc']:.3f}, em={test_em_unchanged_zero.mean().item() - results['test_em']:.3f}")
+
+                        # Restore original embeddings
+                        with torch.no_grad():
+                            trained_model.pos_emb.data.copy_(original_pos_emb)
+
+                        # ============= SUMMARY =============
+                        print(f"\n{'='*80}")
+                        print("SUMMARY: Positional Embedding Importance")
+                        print("="*80)
+                        print(f"\nAdding Random Noise (scale=100):")
+                        print(f"  CHANGED positions (0-{max(changed_positions)}):   Accuracy drop = {results['test_acc'] - test_acc_changed.mean().item():.3f}")
+                        print(f"  UNCHANGED positions ({min(unchanged_positions)}+): Accuracy drop = {results['test_acc'] - test_acc_unchanged.mean().item():.3f}")
+
+                        print(f"\nZeroing Out Embeddings:")
+                        print(f"  CHANGED positions (0-{max(changed_positions)}):   Accuracy drop = {results['test_acc'] - test_acc_changed_zero.mean().item():.3f}")
+                        print(f"  UNCHANGED positions ({min(unchanged_positions)}+): Accuracy drop = {results['test_acc'] - test_acc_unchanged_zero.mean().item():.3f}")
+
+                        print(f"\nConclusion:")
+                        print(f"  Noise on CHANGED:   {'Affects model' if abs(results['test_acc'] - test_acc_changed.mean().item()) > 0.01 else 'No effect'}")
+                        print(f"  Noise on UNCHANGED: {'Affects model' if abs(results['test_acc'] - test_acc_unchanged.mean().item()) > 0.01 else 'No effect'}")
+                        print(f"  Zero CHANGED:       {'Affects model' if abs(results['test_acc'] - test_acc_changed_zero.mean().item()) > 0.01 else 'No effect'}")
+                        print(f"  Zero UNCHANGED:     {'Affects model' if abs(results['test_acc'] - test_acc_unchanged_zero.mean().item()) > 0.01 else 'No effect'}")
+
+                print("="*80 + "\n")
+
     # Summary across all runs
     print(f"\n{'='*20} SUMMARY ACROSS {num_runs} RUNS {'='*20}")
     

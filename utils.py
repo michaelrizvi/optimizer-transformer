@@ -1110,62 +1110,60 @@ class TransformerModels(nn.Module):
 
     def _init_rope_frequencies(self):
         """Initialize and cache the frequency tensor for RoPE."""
-        head_dim = self.d_model // self.n_heads
         # Compute inverse frequencies: 1 / (base^(2i/d)) for i in [0, d/2)
-        inv_freq = 1.0 / (self.rope_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        # Using d_model directly since we're applying to embeddings
+        inv_freq = 1.0 / (self.rope_base ** (torch.arange(0, self.d_model, 2, dtype=torch.float32) / self.d_model))
         # Register as buffer (not a parameter, but part of model state)
         self.register_buffer('rope_inv_freq', inv_freq)
 
-    def _apply_rotary_embeddings(self, q, k, seq_len):
-        """Apply rotary position embeddings to Q and K.
+    def _apply_rotary_embeddings_to_hidden(self, hidden, seq_len):
+        """Apply rotary position embeddings directly to hidden states.
 
         Args:
-            q: (batch_size, model_count, n_heads, seq_len, head_dim)
-            k: (batch_size, model_count, n_heads, seq_len, head_dim)
+            hidden: (batch_size, model_count, seq_len, d_model)
             seq_len: sequence length
 
         Returns:
-            q_rot, k_rot: Q and K with rotary embeddings applied
+            hidden_rot: hidden states with rotary embeddings applied
         """
         # Create position indices [0, 1, 2, ..., seq_len-1]
-        positions = torch.arange(seq_len, device=q.device, dtype=self.rope_inv_freq.dtype)
+        positions = torch.arange(seq_len, device=hidden.device, dtype=self.rope_inv_freq.dtype)
 
         # Compute frequencies for each position: outer product of positions and inv_freq
-        # positions: (seq_len,), rope_inv_freq: (head_dim/2,)
-        # freqs: (seq_len, head_dim/2)
+        # positions: (seq_len,), rope_inv_freq: (d_model/2,)
+        # freqs: (seq_len, d_model/2)
         freqs = torch.outer(positions, self.rope_inv_freq)
 
         # Create cos and sin embeddings
-        # emb: (seq_len, head_dim/2)
+        # emb: (seq_len, d_model/2)
         cos_emb = freqs.cos()
         sin_emb = freqs.sin()
 
-        # Reshape to match q and k dimensions
-        # (seq_len, head_dim/2) -> (1, 1, 1, seq_len, head_dim/2)
-        cos_emb = cos_emb.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-        sin_emb = sin_emb.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        # Reshape to match hidden dimensions
+        # (seq_len, d_model/2) -> (1, 1, seq_len, d_model/2)
+        cos_emb = cos_emb.unsqueeze(0).unsqueeze(0)
+        sin_emb = sin_emb.unsqueeze(0).unsqueeze(0)
 
-        # Apply rotary embeddings
-        q_rot = self._rotate_half(q, cos_emb, sin_emb)
-        k_rot = self._rotate_half(k, cos_emb, sin_emb)
+        # Apply rotary embeddings to hidden states
+        hidden_rot = self._rotate_half_hidden(hidden, cos_emb, sin_emb)
 
-        return q_rot, k_rot
+        return hidden_rot
 
-    def _rotate_half(self, x, cos_emb, sin_emb):
-        """Rotate half the hidden dimensions.
+    def _rotate_half_hidden(self, x, cos_emb, sin_emb):
+        """Rotate half the hidden dimensions for hidden states.
 
         Args:
-            x: (batch_size, model_count, n_heads, seq_len, head_dim)
-            cos_emb: (1, 1, 1, seq_len, head_dim/2)
-            sin_emb: (1, 1, 1, seq_len, head_dim/2)
+            x: (batch_size, model_count, seq_len, d_model)
+            cos_emb: (1, 1, seq_len, d_model/2)
+            sin_emb: (1, 1, seq_len, d_model/2)
 
         Returns:
-            x_rotated: (batch_size, model_count, n_heads, seq_len, head_dim)
+            x_rotated: (batch_size, model_count, seq_len, d_model)
         """
-        # Split x into two halves along head_dim
-        head_dim = x.size(-1)
-        x1 = x[..., :head_dim // 2]  # First half
-        x2 = x[..., head_dim // 2:]  # Second half
+        # Split x into two halves along d_model dimension
+        d_model = x.size(-1)
+        x1 = x[..., :d_model // 2]  # First half
+        x2 = x[..., d_model // 2:]  # Second half
 
         # Apply rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
         x_rot1 = x1 * cos_emb - x2 * sin_emb
@@ -1284,10 +1282,6 @@ class TransformerModels(nn.Module):
         qkv = qkv.transpose(2, 3)  # (batch_size, model_count, n_heads, seq_len, 3*head_dim)
         q, k, v = qkv.chunk(3, dim=-1)  # Each: (batch_size, model_count, n_heads, seq_len, head_dim)
 
-        # Apply rotary position embeddings if using RoPE
-        if self.position_encoding_type == 'rotary':
-            q, k = self._apply_rotary_embeddings(q, k, seq_len)
-
         # Compute attention scores
         head_dim = self.d_model // self.n_heads
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (head_dim ** 0.5)
@@ -1398,8 +1392,8 @@ class TransformerModels(nn.Module):
             pos_emb = self.pos_emb[:, :seq_len].unsqueeze(0).expand(batch_size, -1, -1, -1)
             hidden = token_emb + pos_emb  # (batch_size, model_count, seq_len, d_model)
         elif self.position_encoding_type == 'rotary':
-            # RoPE: no position embeddings added here, applied in attention
-            hidden = token_emb  # (batch_size, model_count, seq_len, d_model)
+            # RoPE: apply rotary embeddings directly to token embeddings
+            hidden = self._apply_rotary_embeddings_to_hidden(token_emb, seq_len)  # (batch_size, model_count, seq_len, d_model)
         elif self.position_encoding_type == 'none':
             # No position embeddings
             hidden = token_emb  # (batch_size, model_count, seq_len, d_model)
