@@ -4,7 +4,7 @@ experiment:
   seed: 42
 
 wandb:
-  enabled: true 
+  enabled: false
   project: length-generalization
   entity: null
   offline: false
@@ -14,11 +14,11 @@ wandb:
 dataset:
   # Training data - shorter sequences (1-10)
   train_min_range: 1
-  train_max_range: 8 
+  train_max_range: 16 
   
   # Test/validation data - longer sequences (11-15)
-  test_min_range: 9 
-  test_max_range: 16
+  test_min_range: 17 
+  test_max_range: 32 
   
   # Dataset sizes
   train_samples: 500 
@@ -26,10 +26,10 @@ dataset:
   test_samples: 200
   
   # Vocabulary parameters
-  vocab_size: 32 
-  sep_token: 30 
-  pad_token: 31 
-  max_length: 32
+  vocab_size: 64 
+  sep_token: 63
+  pad_token: 62 
+  max_length: 128
 
 model:
   d_model: 32

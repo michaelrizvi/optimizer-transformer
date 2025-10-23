@@ -1,15 +1,16 @@
 experiment:
-  num_runs: 1
+  num_runs: 1 
   device: cuda
   seed: 420
+  save_model: true
 
 wandb:
   enabled: false 
   project: length-generalization
   entity: null
   offline: false
-  log_during_training: true
-  log_final: false
+  log_during_training: false
+  log_final: true
 
 dataset:
   # Dataset type
@@ -30,21 +31,21 @@ dataset:
 
   # Vocabulary parameters
   vocab_size: 4 
-  sep_token: 3
+  sep_token: 3 
   pad_token: 2
   max_length: 128
 
 model:
-  d_model: 32 
+  d_model: 64 
   n_layers: 1
   n_heads: 2
-  d_ff: 32
+  d_ff: 64
   max_len: 64 
   dropout: 0.1
   model_count: 1
   init: regular
-  position_encoding_type: rotary
-  rope_base: 64
+  position_encoding_type: none 
+  rope_base: 10000 
 
 optimizer:
   name: SGD

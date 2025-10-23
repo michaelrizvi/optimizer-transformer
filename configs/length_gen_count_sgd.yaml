@@ -2,9 +2,10 @@ experiment:
   num_runs: 1
   device: cuda
   seed: 420
+  save_model: true
 
 wandb:
-  enabled: true
+  enabled: false 
   project: length-generalization
   entity: null
   offline: false
@@ -41,7 +42,7 @@ model:
   model_count: 1
   init: regular
   position_encoding_type: rotary 
-  rope_base: 64 
+  rope_base: 200000
 
 optimizer:
   name: SGD
@@ -53,7 +54,7 @@ optimizer:
   
   # Training parameters
   epochs: 2000 
-  es_acc: 0.999
+  es_acc: 0.995
   
   # Evaluation parameters
   eval_frequency: 10

@@ -4,7 +4,7 @@ experiment:
   seed: 42
 
 wandb:
-  enabled: true 
+  enabled: false 
   project: length-generalization
   entity: null
   offline: false
@@ -17,11 +17,11 @@ dataset:
   
   # Training data - shorter sequences (1-8)
   train_min_range: 1
-  train_max_range: 8 
+  train_max_range: 4 
   
   # Test/validation data - longer sequences (9-16) 
-  test_min_range: 9 
-  test_max_range: 16
+  test_min_range: 5
+  test_max_range: 8
   
   # Dataset sizes
   train_samples: 500
@@ -35,14 +35,16 @@ dataset:
   max_length: 32
 
 model:
-  d_model: 64 
+  d_model: 128
   n_layers: 2
   n_heads: 4
-  d_ff: 64 
-  max_len: 64
+  d_ff: 256
+  max_len: 32 
   dropout: 0.1
   model_count: 1
   init: regular
+  position_encoding_type: absolute 
+  rope_base: 10000
 
 optimizer:
   name: SGD
@@ -50,7 +52,7 @@ optimizer:
   # SGD parameters
   lr: 0.001
   momentum: 0.9
-  batch_size: 128
+  batch_size: 256 
   
   # Training parameters
   epochs: 800
