@@ -662,6 +662,11 @@ class CopyDataset(Dataset):
     Input: [4, 12, 3, 7]
     Output: [4, 12, 3, 7]
     Full sequence: [4, 12, 3, 7, 102, 4, 12, 3, 7]  (102 is separator '>')
+
+    This dataset ensures:
+    - All input sequences are unique (no duplicate input sequences across samples)
+    - Each input sequence contains unique tokens (sampled without replacement from vocab)
+    - Sequence lengths are sampled uniformly from [min_range_size, max_range_size]
     """
 
     def __init__(
@@ -687,23 +692,54 @@ class CopyDataset(Dataset):
         # Set seed for reproducibility
         torch.manual_seed(seed)
 
-        # Pregenerate all samples
+        # Create list of valid tokens (excluding special tokens)
+        all_tokens = set(range(self.vocab_size))
+        special_tokens = {self.sep_token, self.pad_token}
+        valid_tokens = torch.tensor(sorted(all_tokens - special_tokens))
+
+        # Check if we have enough valid tokens
+        if self.unique_values and len(valid_tokens) < self.max_range_size:
+            raise ValueError(
+                f"Not enough valid tokens for unique sequences. "
+                f"vocab_size={vocab_size}, special tokens={special_tokens}, "
+                f"valid tokens={len(valid_tokens)}, but max_range_size={max_range_size}"
+            )
+
+        # Generate all samples and track uniqueness
         self.sequences = []
-        for _ in range(n_samples):
+        seen_sequences = set()
+
+        # Estimate maximum attempts to find unique sequences
+        max_attempts = n_samples * 100  # Allow many attempts to find unique sequences
+        attempts = 0
+
+        while len(self.sequences) < n_samples and attempts < max_attempts:
+            attempts += 1
+
             # 1) Sample sequence length uniformly from [min_range_size, max_range_size]
             seq_length = torch.randint(self.min_range_size, self.max_range_size + 1, (1,)).item()
 
             # 2) Create random input sequence
             if self.unique_values:
-                # Ensure sequence length doesn't exceed vocab_size for unique values
-                seq_length = min(seq_length, self.vocab_size)
-                # Sample unique values without replacement
-                input_seq = torch.randperm(self.vocab_size)[:seq_length]
+                # Ensure sequence length doesn't exceed number of valid tokens
+                seq_length = min(seq_length, len(valid_tokens))
+                # Sample unique values without replacement from valid tokens only
+                indices = torch.randperm(len(valid_tokens))[:seq_length]
+                input_seq = valid_tokens[indices]
             else:
-                # Sample with replacement (can have duplicates)
-                input_seq = torch.randint(0, self.vocab_size, (seq_length,))
+                # Sample with replacement (can have duplicates) from valid tokens only
+                indices = torch.randint(0, len(valid_tokens), (seq_length,))
+                input_seq = valid_tokens[indices]
 
-            # 3) Copy the input sequence (output = input)
+            # 3) Check for uniqueness - convert to tuple for hashing
+            seq_tuple = tuple(input_seq.tolist())
+            if seq_tuple in seen_sequences:
+                continue
+
+            # 4) This is a valid unique sequence
+            seen_sequences.add(seq_tuple)
+
+            # 5) Copy the input sequence (output = input)
             output_seq = input_seq.clone()
 
             # Create full sequence: input + [sep_token] + copied_output
@@ -714,6 +750,15 @@ class CopyDataset(Dataset):
             ])
 
             self.sequences.append(full_seq)
+
+        # Check if we successfully generated enough unique samples
+        if len(self.sequences) < n_samples:
+            raise ValueError(
+                f"Cannot generate {n_samples} unique copy problems with given constraints. "
+                f"Only generated {len(self.sequences)} unique sequences after {max_attempts} attempts. "
+                f"Consider increasing vocab_size ({vocab_size}), increasing max_range_size ({max_range_size}), "
+                f"or reducing n_samples."
+            )
 
     def __len__(self) -> int:
         return self.n_samples
@@ -830,23 +875,16 @@ class MajorityDataset(Dataset):
 
 
 if __name__ == "__main__":
-    # plotting slab datasets
-    import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(1, 1, figsize=(1*4, 1*4))
-    axes = [axes]
-
-    X, Y = get_slab_data(num_slabs=4)
-    axes[0].scatter(X[Y==0, 0], X[Y==0, 1], color='g', alpha=0.2)
-    axes[0].scatter(X[Y==1, 0], X[Y==1, 1], color='r', alpha=0.2)
-
-    X, Y = get_nonlinear_data(samples=30, num_slabs=4)
-    axes[0].scatter(X[Y==0, 0], X[Y==0, 1], color='g', alpha=0.2)
-    axes[0].scatter(X[Y==1, 0], X[Y==1, 1], color='r', alpha=0.2)
-    axes[0].set_axis_off()
-
-    X, Y = get_linear_data(samples=30)
-    axes[0].scatter(X[Y==0, 0], X[Y==0, 1], color='g', alpha=0.2)
-    axes[0].scatter(X[Y==1, 0], X[Y==1, 1], color='r', alpha=0.2)
-    axes[0].set_axis_off()
-    
-    plt.savefig('slab_dataset_nonlinear.png')
+    copy_dataset = CopyDataset(
+        n_samples=1000,
+        min_range_size=1,
+        max_range_size=5,
+        vocab_size=10,
+        sep_token=102,
+        pad_token=103,
+        unique_values=True,
+        seed=42,
+    )
+    for i in range(5):
+        seq = copy_dataset[i]
+        print(f"Sample {i}: {seq.tolist()}")

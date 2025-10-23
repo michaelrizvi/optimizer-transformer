@@ -150,10 +150,6 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
         'pad_token': pad_token
     }
 
-    # Add unique_values=True for CopyDataset (already default in class but explicit here)
-    if name == "CopyDataset":
-        dataset_kwargs['unique_values'] = True
-
     # Create one large unique dataset with train_samples + val_samples
     # This ensures no overlap between train and validation sets
     combined_samples = train_samples + val_samples
@@ -181,9 +177,9 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
     val_sequences = [combined_dataset[i] for i in range(train_samples, combined_samples)]
 
     # Check for duplicates between train and val sets and count unique examples
-    # For MajorityDataset, check the full input sequence (before separator)
-    # For CountSequenceDataset, check the first two elements [min_val, max_val]
-    if name == "MajorityDataset":
+    # For MajorityDataset, CopyDataset, and SortingDataset: check the full input sequence (before separator)
+    # For CountSequenceDataset: check the first two elements [min_val, max_val]
+    if name in ["MajorityDataset", "CopyDataset", "SortingDataset"]:
         # Extract input sequences (before separator token)
         def get_input_seq(seq):
             sep_indices = (seq == sep_token).nonzero(as_tuple=True)[0]
@@ -196,6 +192,7 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
         train_pairs = set(get_input_seq(seq) for seq in train_sequences)
         val_pairs = set(get_input_seq(seq) for seq in val_sequences)
     else:
+        # CountSequenceDataset: only check the first two elements [min_val, max_val]
         train_pairs = set((seq[0].item(), seq[1].item()) for seq in train_sequences)
         val_pairs = set((seq[0].item(), seq[1].item()) for seq in val_sequences)
 
@@ -611,7 +608,7 @@ def run_experiment(num_runs, device, seed, save_model, save_dir):
                 optimizer_name = config['optimizer.name']
                 train_range = f"{config['dataset.train_min_range']}-{config['dataset.train_max_range']}"
                 test_range = f"{config['dataset.test_min_range']}-{config['dataset.test_max_range']}"
-                filename = f"{optimizer_name}_run{run+1}_train{train_range}_test{test_range}.pt"
+                filename = f"{config['dataset.name']}_{optimizer_name}_run{run+1}_train{train_range}_test{test_range}.pt"
                 filepath = os.path.join(save_dir, filename)
                 
                 # Save the trained model
