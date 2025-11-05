@@ -10,7 +10,7 @@ import argparse
 import random
 import numpy as np
 from utils import TransformerModels, calculate_transformer_metrics
-from datasets import CountSequenceDataset, SortingDataset, CopyDataset, MajorityDataset
+from datasets import CountSequenceDataset, SortingDataset, CopyDataset, MajorityDataset, Dyck1Dataset
 from fastargs import Section, Param, get_current_config
 from fastargs.validation import OneOf
 from fastargs.decorators import param, section
@@ -46,7 +46,7 @@ Section("wandb", "Weights & Biases logging parameters").params(
 
 Section("dataset", "Dataset parameters for sequence tasks").params(
     # Dataset type selection
-    name=Param(str, default="CountSequenceDataset", desc="Dataset type: CountSequenceDataset, SortingDataset, CopyDataset, or MajorityDataset"),
+    name=Param(str, default="CountSequenceDataset", desc="Dataset type: CountSequenceDataset, SortingDataset, CopyDataset, MajorityDataset, or Dyck1Dataset"),
     
     # Training data length range
     train_min_range=Param(int, default=1, desc="Minimum sequence length for training"),
@@ -131,7 +131,8 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
         "CountSequenceDataset": CountSequenceDataset,
         "SortingDataset": SortingDataset,
         "CopyDataset": CopyDataset,
-        "MajorityDataset": MajorityDataset
+        "MajorityDataset": MajorityDataset,
+        "Dyck1Dataset": Dyck1Dataset
     }
 
     if name not in dataset_classes:
@@ -144,18 +145,25 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
     print(f"  Val/Test: sequences length {test_min_range}-{test_max_range}, {val_samples}/{test_samples} samples")
 
     # Common dataset parameters
-    dataset_kwargs = {
-        'vocab_size': vocab_size,
-        'sep_token': sep_token,
-        'pad_token': pad_token
-    }
+    # Dyck1Dataset has a fixed vocabulary and doesn't take vocab_size parameter
+    if name == "Dyck1Dataset":
+        dataset_kwargs = {
+            'sep_token': sep_token,
+            'pad_token': pad_token
+        }
+    else:
+        dataset_kwargs = {
+            'vocab_size': vocab_size,
+            'sep_token': sep_token,
+            'pad_token': pad_token
+        }
 
     # Create one large unique dataset with train_samples + val_samples
     # This ensures no overlap between train and validation sets
     combined_samples = train_samples + val_samples
 
-    # MajorityDataset uses max_seq_len instead of min_range_size/max_range_size
-    if name == "MajorityDataset":
+    # MajorityDataset and Dyck1Dataset use max_seq_len instead of min_range_size/max_range_size
+    if name in ["MajorityDataset", "Dyck1Dataset"]:
         combined_dataset = dataset_class(
             n_samples=combined_samples,
             max_seq_len=train_max_range,
@@ -177,9 +185,9 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
     val_sequences = [combined_dataset[i] for i in range(train_samples, combined_samples)]
 
     # Check for duplicates between train and val sets and count unique examples
-    # For MajorityDataset, CopyDataset, and SortingDataset: check the full input sequence (before separator)
+    # For MajorityDataset, CopyDataset, SortingDataset, and Dyck1Dataset: check the full input sequence (before separator)
     # For CountSequenceDataset: check the first two elements [min_val, max_val]
-    if name in ["MajorityDataset", "CopyDataset", "SortingDataset"]:
+    if name in ["MajorityDataset", "CopyDataset", "SortingDataset", "Dyck1Dataset"]:
         # Extract input sequences (before separator token)
         def get_input_seq(seq):
             sep_indices = (seq == sep_token).nonzero(as_tuple=True)[0]
@@ -207,7 +215,7 @@ def create_datasets(name, train_min_range, train_max_range, test_min_range, test
         print(f"  ✓ No duplicates between train and val sets")
     
     # Test dataset - longer sequences
-    if name == "MajorityDataset":
+    if name in ["MajorityDataset", "Dyck1Dataset"]:
         test_dataset = dataset_class(
             n_samples=test_samples,
             max_seq_len=test_max_range,

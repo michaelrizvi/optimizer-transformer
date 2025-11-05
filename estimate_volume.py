@@ -358,8 +358,8 @@ def main():
 
         # Constrain ρ to prevent σ from growing too large
         # Cap σ at 1.0 (i.e., ρ <= log(1.0) = 0)
-        with torch.no_grad():
-            rho.clamp_(max=np.log(10.0))
+        #with torch.no_grad():
+        #    rho.clamp_(max=np.log(10.0))
 
         # Early stopping if loss explodes
         #if L_bar.item() > baseline_test_loss * 5.0:

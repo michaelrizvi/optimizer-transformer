@@ -874,6 +874,279 @@ class MajorityDataset(Dataset):
         return self.sequences[index]
 
 
+class Dyck1Dataset(Dataset):
+    """
+    Dataset for DYCK-1 task: classify bracket sequences as well-formed or ill-formed.
+
+    This dataset generates sequences of the form: [bracket_seq] + [sep_token] + [label]
+    where label is 1 for well-formed (balanced) brackets and 0 for ill-formed brackets.
+
+    Dyck-1 language: A string is well-formed if:
+    1. Every opening bracket '(' has a matching closing bracket ')'
+    2. At no point while reading left-to-right does the count of ')' exceed the count of '('
+
+    Token mapping:
+    - 0: '(' (opening bracket)
+    - 1: ')' (closing bracket)
+    - 2: '0' (ill-formed label)
+    - 3: '1' (well-formed label)
+    - sep_token (default 102): '>' (separator)
+    - pad_token (default 103): padding
+
+    Example:
+    Well-formed: [0, 0, 1, 1] + [102] + [3]  representing "(())>1"
+    Ill-formed: [0, 0, 1] + [102] + [2]  representing "((()>0" (unmatched opening)
+    Ill-formed: [0, 1, 1] + [102] + [2]  representing "())>0" (too many closing)
+
+    This dataset ensures:
+    - All sequences are unique (no duplicate bracket sequences)
+    - Approximately 50/50 split between well-formed and ill-formed examples
+    - Sequence lengths sampled uniformly from [1, max_seq_len]
+    """
+
+    def __init__(
+        self,
+        n_samples: int = 5000,
+        max_seq_len: int = 10,
+        sep_token: int = 102,
+        pad_token: int = 103,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.n_samples = n_samples
+        self.max_seq_len = max_seq_len
+        self.sep_token = sep_token
+        self.pad_token = pad_token
+
+        # Token definitions
+        self.OPEN_PAREN = 0
+        self.CLOSE_PAREN = 1
+        self.LABEL_ILL_FORMED = 2
+        self.LABEL_WELL_FORMED = 3
+
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        # Generate all samples and track uniqueness
+        self.sequences = []
+        seen_sequences = set()
+
+        # Track counts for balanced distribution
+        n_well_formed = 0
+        n_ill_formed = 0
+        target_per_class = n_samples // 2
+
+        max_attempts = n_samples * 100
+        attempts = 0
+
+        while len(self.sequences) < n_samples and attempts < max_attempts:
+            attempts += 1
+
+            # Decide whether to generate well-formed or ill-formed
+            # Maintain roughly 50/50 split
+            if n_well_formed >= target_per_class:
+                generate_well_formed = False
+            elif n_ill_formed >= target_per_class:
+                generate_well_formed = True
+            else:
+                generate_well_formed = torch.rand(1).item() > 0.5
+
+            if generate_well_formed:
+                bracket_seq = self._generate_well_formed_dyck()
+            else:
+                bracket_seq = self._generate_ill_formed_dyck()
+
+            # Check uniqueness
+            seq_tuple = tuple(bracket_seq.tolist())
+            if seq_tuple in seen_sequences:
+                continue
+
+            seen_sequences.add(seq_tuple)
+
+            # Determine label
+            is_well_formed = self._is_well_formed_dyck(bracket_seq)
+            label = self.LABEL_WELL_FORMED if is_well_formed else self.LABEL_ILL_FORMED
+
+            # Verify our generation logic is correct
+            if generate_well_formed and not is_well_formed:
+                continue  # Skip if we failed to generate correct type
+            if not generate_well_formed and is_well_formed:
+                continue  # Skip if we failed to generate correct type
+
+            # Update counts
+            if is_well_formed:
+                n_well_formed += 1
+            else:
+                n_ill_formed += 1
+
+            # Create full sequence: brackets + separator + label
+            full_seq = torch.cat([
+                bracket_seq,
+                torch.tensor([self.sep_token]),
+                torch.tensor([label])
+            ])
+
+            self.sequences.append(full_seq)
+
+        # Check if we successfully generated enough unique samples
+        if len(self.sequences) < n_samples:
+            raise ValueError(
+                f"Cannot generate {n_samples} unique Dyck-1 problems with given constraints. "
+                f"Only generated {len(self.sequences)} unique sequences after {max_attempts} attempts. "
+                f"Consider increasing max_seq_len ({max_seq_len}) or reducing n_samples."
+            )
+
+    def _generate_well_formed_dyck(self) -> torch.Tensor:
+        """
+        Generate a well-formed Dyck-1 string using a random walk approach.
+
+        The string must satisfy:
+        1. Equal number of '(' and ')'
+        2. At no point does count(')') exceed count('(')
+        """
+        # Sample sequence length (must be even for well-formed)
+        # Length is in range [2, max_seq_len], rounded down to nearest even number
+        max_even_len = self.max_seq_len if self.max_seq_len % 2 == 0 else self.max_seq_len - 1
+        if max_even_len < 2:
+            max_even_len = 2
+
+        # Sample even length
+        num_pairs = torch.randint(1, max_even_len // 2 + 1, (1,)).item()
+        seq_length = num_pairs * 2
+
+        # Generate using random valid Dyck path
+        # We maintain a balance counter and ensure it never goes negative
+        bracket_seq = []
+        balance = 0
+        open_remaining = num_pairs
+        close_remaining = num_pairs
+
+        while len(bracket_seq) < seq_length:
+            # Can we add an opening bracket?
+            can_open = open_remaining > 0
+            # Can we add a closing bracket? (only if balance > 0)
+            can_close = close_remaining > 0 and balance > 0
+
+            # Must close if no more opens available
+            if not can_open and can_close:
+                bracket_seq.append(self.CLOSE_PAREN)
+                close_remaining -= 1
+                balance -= 1
+            # Must open if cannot close yet
+            elif can_open and not can_close:
+                bracket_seq.append(self.OPEN_PAREN)
+                open_remaining -= 1
+                balance += 1
+            # Random choice if both possible
+            elif can_open and can_close:
+                if torch.rand(1).item() > 0.5:
+                    bracket_seq.append(self.OPEN_PAREN)
+                    open_remaining -= 1
+                    balance += 1
+                else:
+                    bracket_seq.append(self.CLOSE_PAREN)
+                    close_remaining -= 1
+                    balance -= 1
+
+        return torch.tensor(bracket_seq, dtype=torch.long)
+
+    def _generate_ill_formed_dyck(self) -> torch.Tensor:
+        """
+        Generate an ill-formed Dyck-1 string.
+
+        Two types of ill-formed strings:
+        1. Too many closing brackets (balance goes negative)
+        2. Unmatched opening brackets (balance > 0 at end)
+        """
+        # Sample sequence length uniformly from [1, max_seq_len]
+        seq_length = torch.randint(1, self.max_seq_len + 1, (1,)).item()
+
+        # Decide type of ill-formed string
+        ill_formed_type = torch.randint(0, 2, (1,)).item()
+
+        if ill_formed_type == 0:
+            # Type 1: Too many closing brackets
+            # Generate a string that will have ')' exceeding '(' at some point
+            bracket_seq = []
+            balance = 0
+
+            for _ in range(seq_length):
+                # Randomly choose bracket
+                if torch.rand(1).item() > 0.5:
+                    bracket_seq.append(self.OPEN_PAREN)
+                    balance += 1
+                else:
+                    bracket_seq.append(self.CLOSE_PAREN)
+                    balance -= 1
+
+            # Ensure it's actually ill-formed by checking if balance ever went negative
+            if not self._is_well_formed_dyck(torch.tensor(bracket_seq, dtype=torch.long)):
+                return torch.tensor(bracket_seq, dtype=torch.long)
+            else:
+                # Force it to be ill-formed by adding extra closing bracket
+                if len(bracket_seq) < self.max_seq_len:
+                    bracket_seq.insert(0, self.CLOSE_PAREN)
+                else:
+                    bracket_seq[0] = self.CLOSE_PAREN
+                return torch.tensor(bracket_seq, dtype=torch.long)
+
+        else:
+            # Type 2: Unmatched opening brackets (unbalanced at end)
+            # Generate with more '(' than ')'
+            num_open = torch.randint(1, seq_length + 1, (1,)).item()
+            num_close = torch.randint(0, num_open, (1,)).item()  # Strictly less than num_open
+
+            # Ensure we have unmatched opens
+            if num_close >= num_open:
+                num_close = max(0, num_open - 1)
+
+            # Adjust to fit within max_seq_len
+            total = num_open + num_close
+            if total > seq_length:
+                # Scale down proportionally
+                ratio = seq_length / total
+                num_open = max(1, int(num_open * ratio))
+                num_close = seq_length - num_open
+                # Ensure still unbalanced
+                if num_close >= num_open:
+                    num_close = max(0, num_open - 1)
+
+            # Create bracket sequence by shuffling opens and closes
+            bracket_seq = [self.OPEN_PAREN] * num_open + [self.CLOSE_PAREN] * num_close
+            np.random.shuffle(bracket_seq)
+
+            return torch.tensor(bracket_seq, dtype=torch.long)
+
+    def _is_well_formed_dyck(self, bracket_seq: torch.Tensor) -> bool:
+        """
+        Check if a bracket sequence is well-formed Dyck-1.
+
+        A sequence is well-formed if:
+        1. Balance never goes negative (no ')' before matching '(')
+        2. Final balance is zero (all brackets matched)
+        """
+        balance = 0
+        for bracket in bracket_seq:
+            if bracket.item() == self.OPEN_PAREN:
+                balance += 1
+            elif bracket.item() == self.CLOSE_PAREN:
+                balance -= 1
+
+            # If balance goes negative, not well-formed
+            if balance < 0:
+                return False
+
+        # Must end with balance = 0
+        return balance == 0
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return self.sequences[index]
+
+
 if __name__ == "__main__":
     copy_dataset = CopyDataset(
         n_samples=1000,

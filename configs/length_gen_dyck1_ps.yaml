@@ -1,0 +1,57 @@
+experiment:
+  num_runs: 1
+  device: cuda
+  seed: 42
+
+wandb:
+  enabled: false
+  project: length-generalization
+  entity: null
+  offline: false
+  log_during_training: true
+  log_final: false
+
+dataset:
+  # Dataset type
+  name: Dyck1Dataset
+
+  # Training data - shorter sequences (1-16)
+  train_min_range: 1
+  train_max_range: 16
+
+  # Test/validation data - longer sequences (17-32)
+  test_min_range: 17
+  test_max_range: 32
+
+  # Dataset sizes
+  train_samples: 500
+  val_samples: 200
+  test_samples: 200
+
+  # Vocabulary parameters (Dyck1Dataset has fixed vocab: 0='(', 1=')', 2='0', 3='1', sep, pad)
+  vocab_size: 104  # Large enough to accommodate all tokens
+  sep_token: 102
+  pad_token: 103
+  max_length: 128
+
+model:
+  d_model: 64
+  n_layers: 2
+  n_heads: 4
+  d_ff: 128 
+  max_len: 64
+  dropout: 0.1
+  model_count: 64 
+  init: regular
+  position_encoding_type: rotary  # Use RoPE for position encoding
+  rope_base: 500000  # Large base for better long-range generalization
+
+optimizer:
+  name: PatternSearchFast
+
+  # Training parameters
+  epochs: 30000  # Large number for pattern search
+  es_acc: 0.99
+
+  # Evaluation parameters
+  eval_frequency: 100
