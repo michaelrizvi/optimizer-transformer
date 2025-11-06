@@ -1,7 +1,7 @@
 experiment:
   num_runs: 1
   device: cuda
-  seed: 420
+  seed: 43
   save_model: true
 
 wandb:
@@ -14,37 +14,37 @@ wandb:
 
 dataset:
   # Dataset type
-  name: Dyck1Dataset
+  name: ShuffleDyckDataset
 
   # Training data - shorter sequences (1-16)
   train_min_range: 1
-  train_max_range: 16
+  train_max_range: 10
 
   # Test/validation data - longer sequences (17-32)
-  test_min_range: 17
-  test_max_range: 32
+  test_min_range: 11
+  test_max_range: 20
 
   # Dataset sizes
   train_samples: 500
   val_samples: 200
   test_samples: 200
 
-  # Vocabulary parameters (Dyck1Dataset has fixed vocab: 0='(', 1=')', 2='0', 3='1', sep, pad)
-  vocab_size: 16 # Large enough to accommodate all tokens
-  sep_token: 15 
-  pad_token: 14
+  # Vocabulary parameters (ShuffleDyckDataset has fixed vocab: 0='(', 1=')', 2='0', 3='1', sep, pad)
+  vocab_size: 8  # Large enough to accommodate all tokens
+  sep_token: 7 
+  pad_token: 6 
   max_length: 128
 
 model:
-  d_model: 64
-  n_layers: 2
-  n_heads: 2
+  d_model: 32 
+  n_layers: 1
+  n_heads: 8 
   d_ff: 64 
   max_len: 64
   dropout: 0.1
   model_count: 1
   init: regular
-  position_encoding_type: rotary # Use RoPE for position encoding
+  position_encoding_type: none  # Use RoPE for position encoding
   rope_base: 500000  # Large base for better long-range generalization
 
 optimizer:
@@ -53,10 +53,10 @@ optimizer:
   # SGD parameters
   lr: 0.001
   momentum: 0.9
-  batch_size: 32 
+  batch_size: 16 
 
   # Training parameters
-  epochs: 2000
+  epochs: 1000
   es_acc: 0.999
 
   # Evaluation parameters

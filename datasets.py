@@ -1147,6 +1147,225 @@ class Dyck1Dataset(Dataset):
         return self.sequences[index]
 
 
+class ShuffleDyckDataset(Dataset):
+    """
+    Dataset for SHUFFLE-DYCK task: classify bracket sequences based on count balance only.
+
+    This dataset generates sequences of the form: [bracket_seq] + [sep_token] + [label]
+    where label is 1 for well-formed (balanced) brackets and 0 for ill-formed brackets.
+
+    Shuffle-Dyck language: A string is well-formed if it has equal counts of '(' and ')'.
+    Unlike Dyck-1, the ORDER does NOT matter - only the counts.
+
+    Examples:
+    - Well-formed: (), )(, ))(( (all have equal counts of opening and closing)
+    - Ill-formed: (, ()), ((( (unequal counts)
+
+    Token mapping (same as Dyck1Dataset):
+    - 0: '(' (opening bracket)
+    - 1: ')' (closing bracket)
+    - 2: '0' (ill-formed label)
+    - 3: '1' (well-formed label)
+    - sep_token (default 102): '>' (separator)
+    - pad_token (default 103): padding
+
+    Example:
+    Well-formed: [1, 0, 1, 0] + [102] + [3]  representing ")()(>1"
+    Ill-formed: [0, 0, 1] + [102] + [2]  representing "(()>0" (unequal counts)
+
+    This dataset ensures:
+    - All sequences are unique (no duplicate bracket sequences)
+    - Approximately 50/50 split between well-formed and ill-formed examples
+    - Sequence lengths sampled uniformly from [1, max_seq_len]
+    """
+
+    def __init__(
+        self,
+        n_samples: int = 5000,
+        max_seq_len: int = 10,
+        sep_token: int = 102,
+        pad_token: int = 103,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.n_samples = n_samples
+        self.max_seq_len = max_seq_len
+        self.sep_token = sep_token
+        self.pad_token = pad_token
+
+        # Token definitions (same as Dyck1Dataset)
+        self.OPEN_PAREN = 0
+        self.CLOSE_PAREN = 1
+        self.LABEL_ILL_FORMED = 2
+        self.LABEL_WELL_FORMED = 3
+
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        # Generate all samples and track uniqueness
+        self.sequences = []
+        seen_sequences = set()
+
+        # Track counts for balanced distribution
+        n_well_formed = 0
+        n_ill_formed = 0
+        target_per_class = n_samples // 2
+
+        max_attempts = n_samples * 100
+        attempts = 0
+
+        while len(self.sequences) < n_samples and attempts < max_attempts:
+            attempts += 1
+
+            # Decide whether to generate well-formed or ill-formed
+            # Maintain roughly 50/50 split
+            if n_well_formed >= target_per_class:
+                generate_well_formed = False
+            elif n_ill_formed >= target_per_class:
+                generate_well_formed = True
+            else:
+                generate_well_formed = torch.rand(1).item() > 0.5
+
+            if generate_well_formed:
+                bracket_seq = self._generate_well_formed_shuffle_dyck()
+            else:
+                bracket_seq = self._generate_ill_formed_shuffle_dyck()
+
+            # Check uniqueness
+            seq_tuple = tuple(bracket_seq.tolist())
+            if seq_tuple in seen_sequences:
+                continue
+
+            seen_sequences.add(seq_tuple)
+
+            # Determine label based on count balance
+            is_well_formed = self._is_well_formed_shuffle_dyck(bracket_seq)
+            label = self.LABEL_WELL_FORMED if is_well_formed else self.LABEL_ILL_FORMED
+
+            # Verify our generation logic is correct
+            if generate_well_formed and not is_well_formed:
+                continue  # Skip if we failed to generate correct type
+            if not generate_well_formed and is_well_formed:
+                continue  # Skip if we failed to generate correct type
+
+            # Update counts
+            if is_well_formed:
+                n_well_formed += 1
+            else:
+                n_ill_formed += 1
+
+            # Create full sequence: brackets + separator + label
+            full_seq = torch.cat([
+                bracket_seq,
+                torch.tensor([self.sep_token]),
+                torch.tensor([label])
+            ])
+
+            self.sequences.append(full_seq)
+
+        # Check if we successfully generated enough unique samples
+        if len(self.sequences) < n_samples:
+            raise ValueError(
+                f"Cannot generate {n_samples} unique Shuffle-Dyck problems with given constraints. "
+                f"Only generated {len(self.sequences)} unique sequences after {max_attempts} attempts. "
+                f"Consider increasing max_seq_len ({max_seq_len}) or reducing n_samples."
+            )
+
+    def _generate_well_formed_shuffle_dyck(self) -> torch.Tensor:
+        """
+        Generate a well-formed Shuffle-Dyck string.
+
+        The string must have equal counts of '(' and ')' in any order.
+        """
+        # Sample sequence length (must be even for well-formed)
+        max_even_len = self.max_seq_len if self.max_seq_len % 2 == 0 else self.max_seq_len - 1
+        if max_even_len < 2:
+            max_even_len = 2
+
+        # Sample even length
+        num_pairs = torch.randint(1, max_even_len // 2 + 1, (1,)).item()
+        seq_length = num_pairs * 2
+
+        # Create sequence with equal number of opening and closing brackets
+        bracket_seq = [self.OPEN_PAREN] * num_pairs + [self.CLOSE_PAREN] * num_pairs
+
+        # Shuffle randomly (this is the key difference from Dyck-1!)
+        np.random.shuffle(bracket_seq)
+
+        return torch.tensor(bracket_seq, dtype=torch.long)
+
+    def _generate_ill_formed_shuffle_dyck(self) -> torch.Tensor:
+        """
+        Generate an ill-formed Shuffle-Dyck string.
+
+        Two types of ill-formed strings:
+        1. More opening brackets than closing brackets
+        2. More closing brackets than opening brackets
+        """
+        # Sample sequence length uniformly from [1, max_seq_len]
+        seq_length = torch.randint(1, self.max_seq_len + 1, (1,)).item()
+
+        # Decide type of ill-formed string
+        ill_formed_type = torch.randint(0, 2, (1,)).item()
+
+        if ill_formed_type == 0:
+            # Type 1: More opening brackets than closing brackets
+            num_open = torch.randint(1, seq_length + 1, (1,)).item()
+            num_close = torch.randint(0, num_open, (1,)).item()  # Strictly less than num_open
+
+            # Ensure we have more opens than closes
+            if num_close >= num_open:
+                num_close = max(0, num_open - 1)
+
+        else:
+            # Type 2: More closing brackets than opening brackets
+            num_close = torch.randint(1, seq_length + 1, (1,)).item()
+            num_open = torch.randint(0, num_close, (1,)).item()  # Strictly less than num_close
+
+            # Ensure we have more closes than opens
+            if num_open >= num_close:
+                num_open = max(0, num_close - 1)
+
+        # Adjust to fit within max_seq_len
+        total = num_open + num_close
+        if total > seq_length:
+            # Scale down proportionally
+            ratio = seq_length / total
+            num_open = int(num_open * ratio)
+            num_close = seq_length - num_open
+
+            # Ensure still unbalanced (favor the originally larger type)
+            if ill_formed_type == 0 and num_close >= num_open:
+                num_close = max(0, num_open - 1)
+            elif ill_formed_type == 1 and num_open >= num_close:
+                num_open = max(0, num_close - 1)
+
+        # Create bracket sequence by shuffling opens and closes
+        bracket_seq = [self.OPEN_PAREN] * num_open + [self.CLOSE_PAREN] * num_close
+        np.random.shuffle(bracket_seq)
+
+        return torch.tensor(bracket_seq, dtype=torch.long)
+
+    def _is_well_formed_shuffle_dyck(self, bracket_seq: torch.Tensor) -> bool:
+        """
+        Check if a bracket sequence is well-formed Shuffle-Dyck.
+
+        A sequence is well-formed if it has equal counts of '(' and ')'.
+        Order does NOT matter.
+        """
+        open_count = (bracket_seq == self.OPEN_PAREN).sum().item()
+        close_count = (bracket_seq == self.CLOSE_PAREN).sum().item()
+
+        return open_count == close_count
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, index) -> torch.Tensor:
+        return self.sequences[index]
+
+
 if __name__ == "__main__":
     copy_dataset = CopyDataset(
         n_samples=1000,
